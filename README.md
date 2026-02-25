@@ -1,11 +1,11 @@
-# 四季亭 音乐API
+# 四季亭 简易音乐API
 
 ## 新版 API (Cloudflare Workers 部署)
 ## api url
 ```
 api1(国内推荐 ):https://api.xn--bgtt50a8xt.cn/
 api2:https://classin-music-api.3687448041.workers.dev/
-
+```
 ### 部署方式
 
 ```
