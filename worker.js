@@ -1,21 +1,60 @@
 const MUSIC_DIR = 'music/';
 const LRC_DIR = 'lrc/';
-
-const MUSIC_FILES = [
-  '乌托邦P - 反乌托邦.mp3',
-  '铁花飞 - Mili,塞壬唱片-MSR.mp3',
-  "I Can't Wait (秋绘翻唱).mp3",
-  'ナナツカゼ - あのね.mp3'
-];
-
-const LRC_FILES = [
-  '乌托邦P - 反乌托邦.lrc',
-  '铁花飞 - Mili,塞壬唱片-MSR.lrc',
-  "I Can't Wait (秋绘翻唱).lrc",
-  'ナナツカゼ - あのね.lrc'
-];
-
 const BASE_URL = 'https://raw.githubusercontent.com/Luo202044/classinapi/main/';
+const GITHUB_API = 'https://api.github.com/repos/Luo202044/classinapi/contents';
+
+let cachedPlaylist = null;
+let cacheTime = 0;
+const CACHE_TTL = 5 * 60 * 1000;
+
+async function fetchGitHubContent(path) {
+  const response = await fetch(`${GITHUB_API}/${path}`, {
+    headers: { 'Accept': 'application/vnd.github.v3+json' }
+  });
+  if (!response.ok) return [];
+  return await response.json();
+}
+
+async function getPlaylist() {
+  const now = Date.now();
+  if (cachedPlaylist && (now - cacheTime) < CACHE_TTL) {
+    return cachedPlaylist;
+  }
+
+  try {
+    const musicFiles = await fetchGitHubContent(MUSIC_DIR);
+    const lrcFiles = await fetchGitHubContent(LRC_DIR);
+
+    const musicList = Array.isArray(musicFiles) 
+      ? musicFiles.filter(f => f.name.endsWith('.mp3')).map(f => f.name)
+      : [];
+    
+    const lrcList = Array.isArray(lrcFiles) 
+      ? lrcFiles.filter(f => f.name.endsWith('.lrc')).map(f => f.name)
+      : [];
+
+    cachedPlaylist = musicList.map((file, index) => {
+      const baseName = file.replace('.mp3', '');
+      const lrcName = lrcList.find(l => l.replace('.lrc', '') === baseName);
+      const info = parseFilename(file);
+      
+      return {
+        id: index + 1,
+        name: file,
+        artist: info.artist,
+        title: info.title,
+        url: `${BASE_URL}${MUSIC_DIR}${encodeURIComponent(file)}`,
+        lrc: lrcName ? `${BASE_URL}${LRC_DIR}${encodeURIComponent(lrcName)}` : null
+      };
+    });
+
+    cacheTime = now;
+    return cachedPlaylist;
+  } catch (error) {
+    console.error('Failed to fetch playlist:', error);
+    return cachedPlaylist || [];
+  }
+}
 
 function parseFilename(filename) {
   const nameWithoutExt = filename.replace(/\.(mp3|lrc)$/i, '');
@@ -49,17 +88,7 @@ async function handleRequest(request) {
 
   try {
     if (path === 'api' || path === 'api/playlist' || path === '') {
-      const playlist = MUSIC_FILES.map((file, index) => {
-        const info = parseFilename(file);
-        return {
-          id: index + 1,
-          name: file,
-          artist: info.artist,
-          title: info.title,
-          url: `${BASE_URL}${MUSIC_DIR}${encodeURIComponent(file)}`,
-          lrc: LRC_FILES[index] ? `${BASE_URL}${LRC_DIR}${encodeURIComponent(LRC_FILES[index])}` : null
-        };
-      });
+      const playlist = await getPlaylist();
 
       return new Response(JSON.stringify({
         code: 200,
@@ -77,20 +106,42 @@ async function handleRequest(request) {
     }
 
     if (path === 'api/random') {
-      const randomIndex = Math.floor(Math.random() * MUSIC_FILES.length);
-      const file = MUSIC_FILES[randomIndex];
-      const info = parseFilename(file);
+      const playlist = await getPlaylist();
+      if (playlist.length === 0) {
+        return new Response(JSON.stringify({
+          code: 404,
+          message: 'No music files found',
+          data: null
+        }), {
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+        });
+      }
+
+      const randomItem = playlist[Math.floor(Math.random() * playlist.length)];
 
       return new Response(JSON.stringify({
         code: 200,
         message: 'success',
+        data: randomItem
+      }, null, 2), {
+        headers: {
+          'Content-Type': 'application/json',
+          ...corsHeaders()
+        }
+      });
+    }
+
+    if (path === 'api/refresh') {
+      cachedPlaylist = null;
+      cacheTime = 0;
+      const playlist = await getPlaylist();
+
+      return new Response(JSON.stringify({
+        code: 200,
+        message: 'Playlist refreshed',
         data: {
-          id: randomIndex + 1,
-          name: file,
-          artist: info.artist,
-          title: info.title,
-          url: `${BASE_URL}${MUSIC_DIR}${encodeURIComponent(file)}`,
-          lrc: LRC_FILES[randomIndex] ? `${BASE_URL}${LRC_DIR}${encodeURIComponent(LRC_FILES[randomIndex])}` : null
+          total: playlist.length,
+          list: playlist
         }
       }, null, 2), {
         headers: {
@@ -112,24 +163,12 @@ async function handleRequest(request) {
         });
       }
 
-      const results = MUSIC_FILES
-        .map((file, index) => {
-          const info = parseFilename(file);
-          return { ...info, index };
-        })
-        .filter(item => 
-          item.title.toLowerCase().includes(query.toLowerCase()) ||
-          item.artist.toLowerCase().includes(query.toLowerCase()) ||
-          item.name.toLowerCase().includes(query.toLowerCase())
-        )
-        .map((item, i) => ({
-          id: item.index + 1,
-          name: item.filename,
-          artist: item.artist,
-          title: item.title,
-          url: `${BASE_URL}${MUSIC_DIR}${encodeURIComponent(item.filename)}`,
-          lrc: LRC_FILES[item.index] ? `${BASE_URL}${LRC_DIR}${encodeURIComponent(LRC_FILES[item.index])}` : null
-        }));
+      const playlist = await getPlaylist();
+      const results = playlist.filter(item => 
+        item.title.toLowerCase().includes(query.toLowerCase()) ||
+        item.artist.toLowerCase().includes(query.toLowerCase()) ||
+        item.name.toLowerCase().includes(query.toLowerCase())
+      );
 
       return new Response(JSON.stringify({
         code: 200,
