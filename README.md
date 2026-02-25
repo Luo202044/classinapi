@@ -73,7 +73,6 @@ Host: luo202044.github.io
 ### 2.3 播放控制接口
 
 不支持
-```
 
 
 ## 4. 错误码
@@ -86,7 +85,28 @@ Host: luo202044.github.io
 | ERROR_FETCH_PLAYLIST | 播放列表获取失败 | 检查网络连接 |
 
 ## 5. 客户端实现说明
+- 由于api是静态，需要手动解析
+```
+classinapi/
+├── README.md          # 项目说明文件
+├── api.txt           # API接口定义
+├── lrc/              # 歌词文件目录
+│   └── 0             # 占位符
+├── music/            # 音乐文件目录
+│   ├── 0             # 占位符
+│   ├── xxxx.mp3
+│   ├── xxxx.mp3
+│   ├── xxxx.mp3
+│   └── xxxx.mp3
 
+```
+你需要在解析结果加music（音乐）和lrc（字幕）路径
+如
+```
+api.txt获取xxxx(音乐）
+解析音乐：https://classinapi.pages.dev/music/xxxx.mp3
+解析字幕：https://classinapi.pages.dev/lrc/xxxx.lrc
+```
 ### 5.1 文件名处理
 - 从文件名中提取艺术家和标题信息
 - 使用正则表达式处理特殊字符和格式
