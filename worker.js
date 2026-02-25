@@ -1,6 +1,5 @@
 const MUSIC_DIR = 'music/';
 const LRC_DIR = 'lrc/';
-const BASE_URL = 'https://raw.githubusercontent.com/Luo202044/classinapi/main/';
 const GITHUB_API = 'https://api.github.com/repos/Luo202044/classinapi/contents';
 
 let cachedPlaylist = null;
@@ -21,7 +20,7 @@ async function fetchGitHubContent(path) {
   return await response.json();
 }
 
-async function getPlaylist() {
+async function getPlaylist(env) {
   const now = Date.now();
   if (cachedPlaylist && (now - cacheTime) < CACHE_TTL) {
     return cachedPlaylist;
@@ -49,8 +48,9 @@ async function getPlaylist() {
         name: file,
         artist: info.artist,
         title: info.title,
-        url: `${BASE_URL}${MUSIC_DIR}${encodeURIComponent(file)}`,
-        lrc: lrcName ? `${BASE_URL}${LRC_DIR}${encodeURIComponent(lrcName)}` : null
+        // 使用环境变量 BASE_URL，如果未定义则回退到硬编码地址
+        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(file)}`,
+        lrc: lrcName ? `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcName)}` : null
       };
     });
 
@@ -84,7 +84,7 @@ function corsHeaders() {
   };
 }
 
-async function handleRequest(request) {
+async function handleRequest(request, env) {
   const url = new URL(request.url);
   const path = url.pathname.replace(/^\/+/, '');
   
@@ -94,7 +94,7 @@ async function handleRequest(request) {
 
   try {
     if (path === 'api' || path === 'api/playlist' || path === '') {
-      const playlist = await getPlaylist();
+      const playlist = await getPlaylist(env);
 
       return new Response(JSON.stringify({
         code: 200,
@@ -112,7 +112,7 @@ async function handleRequest(request) {
     }
 
     if (path === 'api/random') {
-      const playlist = await getPlaylist();
+      const playlist = await getPlaylist(env);
       if (playlist.length === 0) {
         return new Response(JSON.stringify({
           code: 404,
@@ -140,7 +140,7 @@ async function handleRequest(request) {
     if (path === 'api/refresh') {
       cachedPlaylist = null;
       cacheTime = 0;
-      const playlist = await getPlaylist();
+      const playlist = await getPlaylist(env);
 
       return new Response(JSON.stringify({
         code: 200,
@@ -169,7 +169,7 @@ async function handleRequest(request) {
         });
       }
 
-      const playlist = await getPlaylist();
+      const playlist = await getPlaylist(env);
       const results = playlist.filter(item => 
         item.title.toLowerCase().includes(query.toLowerCase()) ||
         item.artist.toLowerCase().includes(query.toLowerCase()) ||
@@ -194,7 +194,7 @@ async function handleRequest(request) {
 
     if (path.startsWith('api/music/')) {
       const filename = decodeURIComponent(path.replace('api/music/', ''));
-      const musicUrl = `${BASE_URL}${MUSIC_DIR}${filename}`;
+      const musicUrl = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${filename}`;
       
       const response = await fetch(musicUrl);
       if (!response.ok) {
@@ -218,7 +218,7 @@ async function handleRequest(request) {
 
     if (path.startsWith('api/lrc/')) {
       const filename = decodeURIComponent(path.replace('api/lrc/', ''));
-      const lrcUrl = `${BASE_URL}${LRC_DIR}${filename}`;
+      const lrcUrl = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${filename}`;
       
       const response = await fetch(lrcUrl);
       if (!response.ok) {
@@ -258,6 +258,9 @@ async function handleRequest(request) {
   }
 }
 
-addEventListener('fetch', event => {
-  event.respondWith(handleRequest(event.request));
-});
+// ES Modules 入口
+export default {
+  async fetch(request, env, ctx) {
+    return handleRequest(request, env);
+  }
+};
