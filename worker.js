@@ -9,9 +9,15 @@ const CACHE_TTL = 5 * 60 * 1000;
 
 async function fetchGitHubContent(path) {
   const response = await fetch(`${GITHUB_API}/${path}`, {
-    headers: { 'Accept': 'application/vnd.github.v3+json' }
+    headers: {
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'Cloudflare-Worker'
+    }
   });
-  if (!response.ok) return [];
+  if (!response.ok) {
+    console.error(`GitHub API error: ${response.status} ${response.statusText}`);
+    return [];
+  }
   return await response.json();
 }
 
