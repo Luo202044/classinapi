@@ -90,7 +90,7 @@ async function fetchGitHubContent(path) {
   // 如果扫描仓库也失败，尝试使用jsDelivr作为备用方案
   try {
     // 构建jsDelivr目录URL
-    const jsDelivrDirUrl = `https://cdn.jsdelivr.net/gh/Luo202044/classinapi@main/${path}`;
+    const jsDelivrDirUrl = `https://cdn.jsdmirror.com/gh/Luo202044/classinapi@f3be701dea515ab152253468e27b35855a851d4f/`;
     const dirResponse = await fetch(jsDelivrDirUrl);
     
     if (!dirResponse.ok) {
