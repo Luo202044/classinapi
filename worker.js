@@ -7,17 +7,61 @@ let cacheTime = 0;
 const CACHE_TTL = 5 * 60 * 1000;
 
 async function fetchGitHubContent(path) {
+  // 首先尝试GitHub API
   const response = await fetch(`${GITHUB_API}/${path}`, {
     headers: {
       'Accept': 'application/vnd.github.v3+json',
       'User-Agent': 'Cloudflare-Worker'
     }
   });
-  if (!response.ok) {
-    console.error(`GitHub API error: ${response.status} ${response.statusText}`);
+  if (response.ok) {
+    return await response.json();
+  }
+  
+  console.error(`GitHub API error: ${response.status} ${response.statusText}. Trying jsDelivr as fallback...`);
+  
+  // 如果GitHub API失败，尝试使用jsDelivr作为备用方案
+  try {
+    // 构建jsDelivr目录URL
+    const jsDelivrDirUrl = `https://cdn.jsdelivr.net/gh/Luo202044/classinapi@main/${path}`;
+    const dirResponse = await fetch(jsDelivrDirUrl);
+    
+    if (!dirResponse.ok) {
+      console.error(`jsDelivr directory access failed: ${dirResponse.status} ${dirResponse.statusText}`);
+      return [];
+    }
+    
+    const html = await dirResponse.text();
+    
+    // 从HTML中解析文件列表，匹配包含文件名的链接
+    // jsDelivr目录页面的链接可能有多种形式，如 <a href="filename.mp3"> 或 <a href="./filename.mp3">
+    const fileRegex = /<a[^>]*href\s*=\s*["']([^"']*?\.(mp3|lrc))["'][^>]*>/gi;
+    const matches = [...html.matchAll(fileRegex)];
+    
+    // 创建模拟GitHub API响应格式的文件对象数组
+    const files = matches.map(match => ({
+      name: match[1],
+      path: `${path}${match[1]}`,
+      sha: '',  // 空值，因为我们不使用这个字段
+      size: 0,  // 空值，因为我们不使用这个字段
+      url: '',  // 空值，因为我们不使用这个字段
+      html_url: '',  // 空值，因为我们不使用这个字段
+      git_url: '',  // 空值，因为我们不使用这个字段
+      download_url: '',  // 空值，因为我们不使用这个字段
+      type: 'file'
+    }));
+    
+    // 去重并返回
+    const uniqueFiles = files.filter((file, index, self) => 
+      index === self.findIndex(f => f.name === file.name)
+    );
+    
+    console.log(`Retrieved ${uniqueFiles.length} files from jsDelivr for path: ${path}`);
+    return uniqueFiles;
+  } catch (error) {
+    console.error(`Fallback to jsDelivr also failed:`, error);
     return [];
   }
-  return await response.json();
 }
 
 async function getPlaylist(env) {
