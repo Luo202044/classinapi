@@ -1,10 +1,12 @@
-const MUSIC_DIR = 'music/';
-const LRC_DIR = 'lrc/';
 const GITHUB_API = 'https://api.github.com/repos/Luo202044/classinapi/contents';
 
 let cachedPlaylist = null;
 let cacheTime = 0;
 const CACHE_TTL = 5 * 60 * 1000;
+
+// 定义音乐和歌词目录
+const MUSIC_DIR = 'music/';
+const LRC_DIR = 'lrc/';
 
 async function fetchGitHubContent(path) {
   // 首先尝试GitHub API
@@ -81,36 +83,22 @@ async function fetchFromStaticApiTxt(path) {
     const apiTxtContent = await apiTxtResponse.text();
     const lines = apiTxtContent.split('\n').filter(line => line.trim() !== '');
     
-    // 根据路径类型过滤文件
-    let fileExtensions;
-    if (path === MUSIC_DIR) {
-      fileExtensions = ['.mp3'];
-    } else if (path === LRC_DIR) {
-      fileExtensions = ['.lrc'];
-    } else {
-      fileExtensions = ['.mp3', '.lrc']; // 默认支持两种类型
-    }
+    // 根据路径类型处理文件
+    let resultFiles = [];
     
-    // 根据路径过滤相应的文件
-    const files = lines
-      .filter(line => {
-        const filename = line.trim();
-        return fileExtensions.some(ext => filename.toLowerCase().includes(ext) || filename.replace(/.*-/, '').toLowerCase().includes(ext));
-      })
-      .map(filename => {
-        // 确定文件类型
-        const lowerFilename = filename.toLowerCase();
-        let ext = '.mp3'; // 默认为mp3
-        if (lowerFilename.includes('.lrc')) ext = '.lrc';
-        
-        // 确保文件名有扩展名
-        const finalFilename = ext === '.mp3' && !lowerFilename.endsWith('.mp3') 
-          ? filename + '.mp3' 
-          : filename;
-        
+    if (path === MUSIC_DIR) {
+      // 为音乐目录创建.mp3文件
+      resultFiles = lines.map(line => {
+        let filename = line.trim();
+        // 如果行以数字开头（如"1乌托邦P-反乌托邦"），去除开头的数字
+        filename = filename.replace(/^\d+/, '');
+        // 确保文件名以.mp3结尾
+        if (!filename.toLowerCase().endsWith('.mp3')) {
+          filename += '.mp3';
+        }
         return {
-          name: finalFilename,
-          path: `${path}${finalFilename}`,
+          name: filename,
+          path: `${MUSIC_DIR}${filename}`,
           sha: '',  // 空值，因为我们不使用这个字段
           size: 0,  // 空值，因为我们不使用这个字段
           url: '',  // 空值，因为我们不使用这个字段
@@ -120,9 +108,34 @@ async function fetchFromStaticApiTxt(path) {
           type: 'file'
         };
       });
+    } else if (path === LRC_DIR) {
+      // 为歌词目录创建.lrc文件
+      resultFiles = lines.map(line => {
+        let filename = line.trim();
+        // 如果行以数字开头，去除开头的数字
+        filename = filename.replace(/^\d+/, '');
+        // 将.mp3替换为.lrc
+        if (filename.toLowerCase().endsWith('.mp3')) {
+          filename = filename.substring(0, filename.length - 4) + '.lrc';
+        } else {
+          filename += '.lrc';
+        }
+        return {
+          name: filename,
+          path: `${LRC_DIR}${filename}`,
+          sha: '',  // 空值，因为我们不使用这个字段
+          size: 0,  // 空值，因为我们不使用这个字段
+          url: '',  // 空值，因为我们不使用这个字段
+          html_url: '',  // 空值，因为我们不使用这个字段
+          git_url: '',  // 空值，因为我们不使用这个字段
+          download_url: '',  // 空值，因为我们不使用这个字段
+          type: 'file'
+        };
+      });
+    }
     
-    console.log(`Retrieved ${files.length} files from static api.txt for path: ${path}`);
-    return files;
+    console.log(`Retrieved ${resultFiles.length} files from static api.txt for path: ${path}`);
+    return resultFiles;
   } catch (error) {
     console.error('Failed to fetch from static api.txt:', error);
     return [];
@@ -136,6 +149,7 @@ async function getPlaylist(env) {
   }
 
   try {
+    // 获取音乐和歌词文件列表
     const musicFiles = await fetchGitHubContent(MUSIC_DIR);
     const lrcFiles = await fetchGitHubContent(LRC_DIR);
 
