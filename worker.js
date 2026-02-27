@@ -1,12 +1,69 @@
+const MUSIC_DIR = 'music/';
+const LRC_DIR = 'lrc/';
 const GITHUB_API = 'https://api.github.com/repos/Luo202044/classinapi/contents';
 
 let cachedPlaylist = null;
 let cacheTime = 0;
 const CACHE_TTL = 5 * 60 * 1000;
 
-// 定义音乐和歌词目录
-const MUSIC_DIR = 'music/';
-const LRC_DIR = 'lrc/';
+// 扫描仓库根目录以获取音乐和歌词文件的完整列表
+async function scanRepoRoot() {
+  try {
+    console.log('Scanning repository root for music and lrc directories...');
+    const response = await fetch(`${GITHUB_API}`, {
+      headers: {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'Cloudflare-Worker'
+      }
+    });
+    
+    if (!response.ok) {
+      console.error(`Failed to scan repo root: ${response.status} ${response.statusText}`);
+      return { musicFiles: [], lrcFiles: [] };
+    }
+    
+    const repoContents = await response.json();
+    
+    // 查找music和lrc目录
+    const musicDir = repoContents.find(item => item.type === 'dir' && item.name === 'music');
+    const lrcDir = repoContents.find(item => item.type === 'dir' && item.name === 'lrc');
+    
+    let musicFiles = [];
+    let lrcFiles = [];
+    
+    if (musicDir) {
+      const musicResponse = await fetch(musicDir.url, {
+        headers: {
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'Cloudflare-Worker'
+        }
+      });
+      if (musicResponse.ok) {
+        const musicContent = await musicResponse.json();
+        musicFiles = musicContent.filter(item => item.type === 'file' && item.name.endsWith('.mp3'));
+      }
+    }
+    
+    if (lrcDir) {
+      const lrcResponse = await fetch(lrcDir.url, {
+        headers: {
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'Cloudflare-Worker'
+        }
+      });
+      if (lrcResponse.ok) {
+        const lrcContent = await lrcResponse.json();
+        lrcFiles = lrcContent.filter(item => item.type === 'file' && item.name.endsWith('.lrc'));
+      }
+    }
+    
+    console.log(`Found ${musicFiles.length} music files and ${lrcFiles.length} lrc files from repo scan`);
+    return { musicFiles, lrcFiles };
+  } catch (error) {
+    console.error('Error scanning repo root:', error);
+    return { musicFiles: [], lrcFiles: [] };
+  }
+}
 
 async function fetchGitHubContent(path) {
   // 首先尝试GitHub API
@@ -20,9 +77,17 @@ async function fetchGitHubContent(path) {
     return await response.json();
   }
   
-  console.error(`GitHub API error: ${response.status} ${response.statusText}. Trying jsDelivr as fallback...`);
+  console.error(`GitHub API error: ${response.status} ${response.statusText}. Trying alternative methods...`);
   
-  // 如果GitHub API失败，尝试使用jsDelivr作为备用方案
+  // 尝试扫描仓库根目录作为备用方法
+  const scanResult = await scanRepoRoot();
+  if (path === MUSIC_DIR) {
+    return scanResult.musicFiles;
+  } else if (path === LRC_DIR) {
+    return scanResult.lrcFiles;
+  }
+  
+  // 如果扫描仓库也失败，尝试使用jsDelivr作为备用方案
   try {
     // 构建jsDelivr目录URL
     const jsDelivrDirUrl = `https://cdn.jsdelivr.net/gh/Luo202044/classinapi@main/${path}`;
@@ -128,7 +193,7 @@ async function fetchFromStaticApiTxt(path) {
           url: '',  // 空值，因为我们不使用这个字段
           html_url: '',  // 空值，因为我们不使用这个字段
           git_url: '',  // 空值，因为我们不使用这个字段
-          download_url: '',  // 空值，因为我们不使用这个字段
+          download_url: '',  // 空值，我们认为不使用这个字段
           type: 'file'
         };
       });
@@ -149,7 +214,7 @@ async function getPlaylist(env) {
   }
 
   try {
-    // 获取音乐和歌词文件列表
+    // 尝试从GitHub API获取文件列表
     const musicFiles = await fetchGitHubContent(MUSIC_DIR);
     const lrcFiles = await fetchGitHubContent(LRC_DIR);
 
