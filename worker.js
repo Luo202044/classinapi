@@ -295,10 +295,19 @@ async function getPlaylist(env) {
       // 确保文件名不包含路径部分
       const fileName = file.split('/').pop().split('\\').pop();
       const baseName = fileName.replace('.mp3', '');
-      const lrcName = lrcList.find(l => {
+      
+      // 查找匹配的歌词文件，确保也处理路径
+      let lrcResult = null;
+      const matchingLrc = lrcList.find(l => {
         const lrcFileName = l.name.split('/').pop().split('\\').pop();
         return lrcFileName.replace('.lrc', '') === baseName;
       });
+      
+      if (matchingLrc) {
+        const lrcFileName = matchingLrc.name.split('/').pop().split('\\').pop();
+        lrcResult = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcFileName)}`;
+      }
+      
       const info = parseFilename(fileName);
       
       return {
@@ -308,7 +317,7 @@ async function getPlaylist(env) {
         title: info.title,
         // 使用环境变量 BASE_URL，如果未定义则回退到硬编码地址
         url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(fileName)}`,
-        lrc: lrcName ? `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcName.split('/').pop().split('\\').pop())}` : null
+        lrc: lrcResult  // 可能为null，如果没有找到匹配的歌词文件
       };
     });
 
@@ -549,23 +558,35 @@ async function handleRequest(request, env) {
       const cleanFilename = filename.split('/').pop().split('\\').pop();
       const lrcUrl = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${cleanFilename}`;
       
-      const response = await fetch(lrcUrl);
-      if (!response.ok) {
-        return new Response(JSON.stringify({
-          code: 404,
-          message: '歌词文件不存在',
-          data: null
-        }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+      try {
+        const response = await fetch(lrcUrl);
+        if (!response.ok) {
+          // 如果歌词文件不存在，返回空的歌词内容而不是404错误
+          console.log(`Lyric file not found: ${cleanFilename}, returning empty content`);
+          return new Response('', {
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              ...corsHeaders()
+            }
+          });
+        }
+
+        return new Response(response.body, {
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            ...corsHeaders()
+          }
+        });
+      } catch (error) {
+        console.error(`Error fetching lyric file: ${error}`);
+        // 发生错误时也返回空内容而不是错误
+        return new Response('', {
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            ...corsHeaders()
+          }
         });
       }
-
-      return new Response(response.body, {
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          ...corsHeaders()
-        }
-      });
     }
 
     return new Response(JSON.stringify({

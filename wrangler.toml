@@ -2,5 +2,11 @@ name = "classin-music-api"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true
+
 [vars]
 BASE_URL = "https://raw.githubusercontent.com/Luo202044/classinapi/main/"
