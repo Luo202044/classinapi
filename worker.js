@@ -258,6 +258,19 @@ async function getPlaylist(env) {
               let filename = line.trim();
               // 移除开头的数字
               filename = filename.replace(/^\d+/, '');
+              
+              // 根据api.txt中的格式生成正确的文件名
+              // 如果文件名包含 "-" 但不是 " - " 格式，将其转换为带空格的格式（匹配实际文件名）
+              if (filename.includes('-') && !filename.includes(' - ')) {
+                if (filename.includes('乌托邦P-反乌托邦')) {
+                  filename = '乌托邦P - 反乌托邦';
+                } else if (filename.includes('ナナツカゼ-あのね')) {
+                  filename = 'ナナツカゼ - あのね';
+                } else if (filename.includes('铁花飞-Mili,塞壬唱片-MSR')) {
+                  filename = '铁花飞-Mili,塞壬唱片-MSR';
+                }
+              }
+              
               // 确保以.mp3结尾
               if (!filename.toLowerCase().endsWith('.mp3')) {
                 filename += '.mp3';
@@ -266,9 +279,14 @@ async function getPlaylist(env) {
               const fileName = filename;
               const info = parseFilename(fileName);
               
-              // 尝试匹配对应的歌词文件
+              // 检查是否存在对应的歌词文件
+              let lrcResult = null;
               const baseName = fileName.replace('.mp3', '');
-              const lrcFileName = `${baseName}.lrc`;
+              const hasLrcFile = ['乌托邦P - 反乌托邦.mp3', 'ナナツカゼ - あのね.mp3'].includes(fileName);
+              if (hasLrcFile) {
+                const lrcFileName = baseName + '.lrc';
+                lrcResult = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcFileName)}`;
+              }
               
               return {
                 id: index + 1,
@@ -276,7 +294,7 @@ async function getPlaylist(env) {
                 artist: info.artist,
                 title: info.title,
                 url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(fileName)}`,
-                lrc: lrcFileName ? `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcFileName)}` : null
+                lrc: lrcResult
               };
             });
             
@@ -300,7 +318,14 @@ async function getPlaylist(env) {
       cachedPlaylist = knownMusicFiles.map((fileName, index) => {
         const info = parseFilename(fileName);
         const baseName = fileName.replace('.mp3', '');
-        const lrcFileName = `${baseName}.lrc`;
+        
+        // 检查是否存在对应的歌词文件
+        let lrcResult = null;
+        const hasLrcFile = ['乌托邦P - 反乌托邦.mp3', 'ナナツカゼ - あのね.mp3'].includes(fileName);
+        if (hasLrcFile) {
+          const lrcFileName = baseName + '.lrc';
+          lrcResult = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcFileName)}`;
+        }
         
         return {
           id: index + 1,
@@ -308,7 +333,7 @@ async function getPlaylist(env) {
           artist: info.artist,
           title: info.title,
           url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(fileName)}`,
-          lrc: lrcFileName ? `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcFileName)}` : null
+          lrc: lrcResult
         };
       });
       
@@ -404,32 +429,32 @@ async function getPlaylist(env) {
         name: '铁花飞-Mili,塞壬唱片-MSR.mp3',
         artist: 'Mili,塞壬唱片-MSR',
         title: '铁花飞',
-        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}铁花飞-Mili,塞壬唱片-MSR.mp3`,
-        lrc: null
+        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent('铁花飞-Mili,塞壬唱片-MSR.mp3')}`,
+        lrc: null  // 此音乐没有歌词文件
       },
       {
         id: 2,
         name: '乌托邦P - 反乌托邦.mp3',
         artist: '乌托邦P',
         title: '反乌托邦',
-        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}乌托邦P%20-%20反乌托邦.mp3`,
-        lrc: null
+        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent('乌托邦P - 反乌托邦.mp3')}`,
+        lrc: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent('乌托邦P - 反乌托邦.lrc')}`  // 此音乐有歌词文件
       },
       {
         id: 3,
         name: 'I Can\'t Wait (秋绘翻唱).mp3',
         artist: '秋绘',
         title: 'I Can\'t Wait (翻唱)',
-        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}I%20Can't%20Wait%20(%E7%A7%8B%E7%BB%98%E7%BF%BB%E5%94%B1).mp3`,
-        lrc: null
+        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent('I Can\'t Wait (秋绘翻唱).mp3')}`,
+        lrc: null  // 此音乐没有歌词文件
       },
       {
         id: 4,
         name: 'ナナツカゼ - あのね.mp3',
         artist: 'ナナツカゼ',
         title: 'あのね',
-        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}%E3%83%8A%E3%83%8A%E3%83%84%E3%82%AB%E3%82%BC%20-%20%E3%81%82%E3%81%AE%E3%81%AD.mp3`,
-        lrc: null
+        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent('ナナツカゼ - あのね.mp3')}`,
+        lrc: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent('ナナツカゼ - あのね.lrc')}`  // 此音乐有歌词文件
       }
     ];
     
@@ -446,6 +471,13 @@ function parseFilename(filename) {
     const parts = nameWithoutExt.split(' - ');
     artist = parts[0].trim();
     title = parts.slice(1).join(' - ').trim();
+  } else if (nameWithoutExt.includes('-')) {
+    // 如果没有空格分隔的 " - "，尝试使用简单的 "-" 分隔符
+    const parts = nameWithoutExt.split('-');
+    if (parts.length >= 2) {
+      artist = parts[0].trim();
+      title = parts.slice(1).join('-').trim();
+    }
   }
 
   return { artist, title, filename };
@@ -478,6 +510,12 @@ async function handleRequest(request, env) {
         let fileNameWithoutExt = item.name.replace('.mp3', '');
         // 如果文件名包含路径分隔符，只取最后部分
         fileNameWithoutExt = fileNameWithoutExt.split('/').pop().split('\\').pop();
+        
+        // 将文件名转换为api.txt格式（如果没有空格的" - "分隔符，移除空格）
+        if (fileNameWithoutExt.includes(' - ')) {
+          fileNameWithoutExt = fileNameWithoutExt.replace(' - ', '-');
+        }
+        
         return fileNameWithoutExt;
       }).join('\n');
       
