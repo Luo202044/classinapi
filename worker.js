@@ -243,7 +243,52 @@ async function getPlaylist(env) {
         cacheTime = now;
         return cachedPlaylist;
       }
-      return []; // 如果没有缓存且获取失败，则返回空列表
+      
+      // 如果所有方法都失败，最后尝试从api.txt直接生成播放列表
+      console.log('All methods failed, trying to generate playlist from api.txt directly...');
+      try {
+        const apiTxtResponse = await fetch('https://raw.githubusercontent.com/Luo202044/classinapi/main/api.txt');
+        if (apiTxtResponse.ok) {
+          const apiTxtContent = await apiTxtResponse.text();
+          const lines = apiTxtContent.split('\n').filter(line => line.trim() !== '');
+          
+          if (lines.length > 0) {
+            console.log(`Generated playlist from api.txt with ${lines.length} entries`);
+            cachedPlaylist = lines.map((line, index) => {
+              let filename = line.trim();
+              // 移除开头的数字
+              filename = filename.replace(/^\d+/, '');
+              // 确保以.mp3结尾
+              if (!filename.toLowerCase().endsWith('.mp3')) {
+                filename += '.mp3';
+              }
+              
+              const fileName = filename;
+              const info = parseFilename(fileName);
+              
+              // 尝试匹配对应的歌词文件
+              const baseName = fileName.replace('.mp3', '');
+              const lrcFileName = `${baseName}.lrc`;
+              
+              return {
+                id: index + 1,
+                name: fileName,
+                artist: info.artist,
+                title: info.title,
+                url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(fileName)}`,
+                lrc: lrcFileName ? `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcFileName)}` : null
+              };
+            });
+            
+            cacheTime = now;
+            return cachedPlaylist;
+          }
+        }
+      } catch (e) {
+        console.error('Failed to generate playlist from api.txt:', e);
+      }
+      
+      return []; // 如果所有方法都失败，则返回空列表
     }
 
     cachedPlaylist = musicList.map((file, index) => {
@@ -278,6 +323,45 @@ async function getPlaylist(env) {
       cacheTime = now;
       return cachedPlaylist;
     }
+    
+    // 在异常情况下也尝试从api.txt生成播放列表
+    try {
+      const apiTxtResponse = await fetch('https://raw.githubusercontent.com/Luo202044/classinapi/main/api.txt');
+      if (apiTxtResponse.ok) {
+        const apiTxtContent = await apiTxtResponse.text();
+        const lines = apiTxtContent.split('\n').filter(line => line.trim() !== '');
+        
+        if (lines.length > 0) {
+          console.log(`Generated playlist from api.txt in error handler with ${lines.length} entries`);
+          const fallbackPlaylist = lines.map((line, index) => {
+            let filename = line.trim();
+            // 移除开头的数字
+            filename = filename.replace(/^\d+/, '');
+            // 确保以.mp3结尾
+            if (!filename.toLowerCase().endsWith('.mp3')) {
+              filename += '.mp3';
+            }
+            
+            const fileName = filename;
+            const info = parseFilename(fileName);
+            
+            return {
+              id: index + 1,
+              name: fileName,
+              artist: info.artist,
+              title: info.title,
+              url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(fileName)}`,
+              lrc: null  // 异常情况下先设置为null
+            };
+          });
+          
+          return fallbackPlaylist;
+        }
+      }
+    } catch (e) {
+      console.error('Failed to generate fallback playlist from api.txt:', e);
+    }
+    
     return [];
   }
 }
