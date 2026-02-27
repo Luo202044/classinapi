@@ -34,8 +34,8 @@ async function fetchGitHubContent(path) {
     const html = await dirResponse.text();
     
     // 从HTML中解析文件列表，匹配包含文件名的链接
-    // jsDelivr目录页面的链接可能有多种形式，如 <a href="filename.mp3"> 或 <a href="./filename.mp3">
-    const fileRegex = /<a[^>]*href\s*=\s*["']([^"']*?\.(mp3|lrc))["'][^>]*>/gi;
+    // jsDelivr目录页面的链接可能有多种形式，如 <a href="filename.mp3"> 或 <a href="./filename.mp3"> 或完整URL
+    const fileRegex = /<a[^>]*href\s*=\s*["'][^"']*(?:\/|^)([^"']*?\.(mp3|lrc))["'][^>]*>/gi;
     const matches = [...html.matchAll(fileRegex)];
     
     // 创建模拟GitHub API响应格式的文件对象数组
@@ -83,18 +83,23 @@ async function getPlaylist(env) {
       : [];
 
     cachedPlaylist = musicList.map((file, index) => {
-      const baseName = file.replace('.mp3', '');
-      const lrcName = lrcList.find(l => l.replace('.lrc', '') === baseName);
-      const info = parseFilename(file);
+      // 确保文件名不包含路径部分
+      const fileName = file.split('/').pop().split('\\').pop();
+      const baseName = fileName.replace('.mp3', '');
+      const lrcName = lrcList.find(l => {
+        const lrcFileName = l.name.split('/').pop().split('\\').pop();
+        return lrcFileName.replace('.lrc', '') === baseName;
+      });
+      const info = parseFilename(fileName);
       
       return {
         id: index + 1,
-        name: file,
+        name: fileName,  // 使用去除路径的文件名
         artist: info.artist,
         title: info.title,
         // 使用环境变量 BASE_URL，如果未定义则回退到硬编码地址
-        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(file)}`,
-        lrc: lrcName ? `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcName)}` : null
+        url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(fileName)}`,
+        lrc: lrcName ? `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcName.split('/').pop().split('\\').pop())}` : null
       };
     });
 
@@ -137,6 +142,27 @@ async function handleRequest(request, env) {
   }
 
   try {
+    // 添加对 /api.txt 端点的支持，返回文本格式的音乐列表
+    if (path === 'api.txt') {
+      const playlist = await getPlaylist(env);
+      
+      // 将音乐列表转换为文本格式，与原始 api.txt 格式相似
+      const textList = playlist.map(item => {
+        // 提取不含扩展名的文件名，并确保去除路径部分
+        let fileNameWithoutExt = item.name.replace('.mp3', '');
+        // 如果文件名包含路径分隔符，只取最后部分
+        fileNameWithoutExt = fileNameWithoutExt.split('/').pop().split('\\').pop();
+        return fileNameWithoutExt;
+      }).join('\n');
+      
+      return new Response(textList, {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          ...corsHeaders()
+        }
+      });
+    }
+    
     if (path === 'api' || path === 'api/playlist' || path === '') {
       const playlist = await getPlaylist(env);
 
@@ -238,7 +264,9 @@ async function handleRequest(request, env) {
 
     if (path.startsWith('api/music/')) {
       const filename = decodeURIComponent(path.replace('api/music/', ''));
-      const musicUrl = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${filename}`;
+      // 确保文件名不包含路径遍历
+      const cleanFilename = filename.split('/').pop().split('\\').pop();
+      const musicUrl = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${cleanFilename}`;
       
       const response = await fetch(musicUrl);
       if (!response.ok) {
@@ -254,7 +282,7 @@ async function handleRequest(request, env) {
       return new Response(response.body, {
         headers: {
           'Content-Type': 'audio/mpeg',
-          'Content-Disposition': `inline; filename="${filename}"`,
+          'Content-Disposition': `inline; filename="${cleanFilename}"`,
           ...corsHeaders()
         }
       });
@@ -262,7 +290,9 @@ async function handleRequest(request, env) {
 
     if (path.startsWith('api/lrc/')) {
       const filename = decodeURIComponent(path.replace('api/lrc/', ''));
-      const lrcUrl = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${filename}`;
+      // 确保文件名不包含路径遍历
+      const cleanFilename = filename.split('/').pop().split('\\').pop();
+      const lrcUrl = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${cleanFilename}`;
       
       const response = await fetch(lrcUrl);
       if (!response.ok) {
