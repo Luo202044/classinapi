@@ -1,6 +1,6 @@
 const MUSIC_DIR = 'music/';
 const LRC_DIR = 'lrc/';
-const GITHUB_API = 'https://api.github.com/repos/Luo202044/classinapi/contents';
+const GITHUB_API = 'https://cdn.jsdmirror.com/gh/Luo202044/classinapi@f3be701dea515ab152253468e27b35855a851d4f/';
 
 let cachedPlaylist = null;
 let cacheTime = 0;
