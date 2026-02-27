@@ -9,4 +9,4 @@ enabled = true
 invocation_logs = true
 
 [vars]
-BASE_URL = "https://cdn.jsdmirror.com/gh/Luo202044/classinapi@main/"
+BASE_URL = "https://cdn.jsdmirror.com/gh/Luo202044/classinapi@f3be701dea515ab152253468e27b35855a851d4f/"
