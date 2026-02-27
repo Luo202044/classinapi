@@ -28,7 +28,8 @@ async function fetchGitHubContent(path) {
     
     if (!dirResponse.ok) {
       console.error(`jsDelivr directory access failed: ${dirResponse.status} ${dirResponse.statusText}`);
-      return [];
+      // 如果jsDelivr也失败，尝试从静态api.txt文件推断文件列表
+      return await fetchFromStaticApiTxt(path);
     }
     
     const html = await dirResponse.text();
@@ -60,6 +61,70 @@ async function fetchGitHubContent(path) {
     return uniqueFiles;
   } catch (error) {
     console.error(`Fallback to jsDelivr also failed:`, error);
+    // 如果jsDelivr也失败，尝试从静态api.txt文件推断文件列表
+    return await fetchFromStaticApiTxt(path);
+  }
+}
+
+// 从静态api.txt文件推断文件列表的备用函数
+async function fetchFromStaticApiTxt(path) {
+  try {
+    console.log(`Trying to fetch from static api.txt as last resort for path: ${path}`);
+    
+    // 获取静态api.txt文件内容
+    const apiTxtResponse = await fetch('https://raw.githubusercontent.com/Luo202044/classinapi/main/api.txt');
+    if (!apiTxtResponse.ok) {
+      console.error('Failed to fetch static api.txt file');
+      return [];
+    }
+    
+    const apiTxtContent = await apiTxtResponse.text();
+    const lines = apiTxtContent.split('\n').filter(line => line.trim() !== '');
+    
+    // 根据路径类型过滤文件
+    let fileExtensions;
+    if (path === MUSIC_DIR) {
+      fileExtensions = ['.mp3'];
+    } else if (path === LRC_DIR) {
+      fileExtensions = ['.lrc'];
+    } else {
+      fileExtensions = ['.mp3', '.lrc']; // 默认支持两种类型
+    }
+    
+    // 根据路径过滤相应的文件
+    const files = lines
+      .filter(line => {
+        const filename = line.trim();
+        return fileExtensions.some(ext => filename.toLowerCase().includes(ext) || filename.replace(/.*-/, '').toLowerCase().includes(ext));
+      })
+      .map(filename => {
+        // 确定文件类型
+        const lowerFilename = filename.toLowerCase();
+        let ext = '.mp3'; // 默认为mp3
+        if (lowerFilename.includes('.lrc')) ext = '.lrc';
+        
+        // 确保文件名有扩展名
+        const finalFilename = ext === '.mp3' && !lowerFilename.endsWith('.mp3') 
+          ? filename + '.mp3' 
+          : filename;
+        
+        return {
+          name: finalFilename,
+          path: `${path}${finalFilename}`,
+          sha: '',  // 空值，因为我们不使用这个字段
+          size: 0,  // 空值，因为我们不使用这个字段
+          url: '',  // 空值，因为我们不使用这个字段
+          html_url: '',  // 空值，因为我们不使用这个字段
+          git_url: '',  // 空值，因为我们不使用这个字段
+          download_url: '',  // 空值，因为我们不使用这个字段
+          type: 'file'
+        };
+      });
+    
+    console.log(`Retrieved ${files.length} files from static api.txt for path: ${path}`);
+    return files;
+  } catch (error) {
+    console.error('Failed to fetch from static api.txt:', error);
     return [];
   }
 }
@@ -74,6 +139,16 @@ async function getPlaylist(env) {
     const musicFiles = await fetchGitHubContent(MUSIC_DIR);
     const lrcFiles = await fetchGitHubContent(LRC_DIR);
 
+    // 检查是否获取到了有效的文件列表
+    if (!Array.isArray(musicFiles) || musicFiles.length === 0) {
+      console.warn('No music files retrieved, using cached playlist if available');
+      if (cachedPlaylist) {
+        // 更新缓存时间，避免频繁重试
+        cacheTime = now;
+        return cachedPlaylist;
+      }
+    }
+
     const musicList = Array.isArray(musicFiles) 
       ? musicFiles.filter(f => f.name.endsWith('.mp3')).map(f => f.name)
       : [];
@@ -81,6 +156,16 @@ async function getPlaylist(env) {
     const lrcList = Array.isArray(lrcFiles) 
       ? lrcFiles.filter(f => f.name.endsWith('.lrc')).map(f => f.name)
       : [];
+
+    if (musicList.length === 0) {
+      console.warn('No music files found, using cached playlist if available');
+      if (cachedPlaylist) {
+        // 更新缓存时间，避免频繁重试
+        cacheTime = now;
+        return cachedPlaylist;
+      }
+      return []; // 如果没有缓存且获取失败，则返回空列表
+    }
 
     cachedPlaylist = musicList.map((file, index) => {
       // 确保文件名不包含路径部分
@@ -107,7 +192,14 @@ async function getPlaylist(env) {
     return cachedPlaylist;
   } catch (error) {
     console.error('Failed to fetch playlist:', error);
-    return cachedPlaylist || [];
+    // 如果当前有缓存数据，返回缓存数据而不是空列表
+    if (cachedPlaylist) {
+      console.log('Using cached playlist due to error');
+      // 更新缓存时间，避免频繁重试
+      cacheTime = now;
+      return cachedPlaylist;
+    }
+    return [];
   }
 }
 
