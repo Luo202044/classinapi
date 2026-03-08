@@ -138,10 +138,11 @@ async function fetchFromStaticApiTxt(path) {
   try {
     console.log(`Trying to fetch from static api.txt as last resort for path: ${path}`);
     
-    // 获取静态api.txt文件内容
-    const apiTxtResponse = await fetch('https://raw.githubusercontent.com/Luo202044/classinapi/main/api.txt');
+    // 获取静态api.txt文件内容，使用env.BASE_URL
+    const apiTxtUrl = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}api.txt`;
+    const apiTxtResponse = await fetch(apiTxtUrl);
     if (!apiTxtResponse.ok) {
-      console.error('Failed to fetch static api.txt file');
+      console.error('Failed to fetch static api.txt file from:', apiTxtUrl);
       return [];
     }
     
@@ -247,56 +248,143 @@ async function getPlaylist(env) {
       // 如果所有方法都失败，最后尝试从api.txt直接生成播放列表
       console.log('All methods failed, trying to generate playlist from api.txt directly...');
       try {
-        const apiTxtResponse = await fetch('https://raw.githubusercontent.com/Luo202044/classinapi/main/api.txt');
+        const apiTxtUrl = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}api.txt`;
+        const apiTxtResponse = await fetch(apiTxtUrl);
         if (apiTxtResponse.ok) {
           const apiTxtContent = await apiTxtResponse.text();
           const lines = apiTxtContent.split('\n').filter(line => line.trim() !== '');
           
           if (lines.length > 0) {
             console.log(`Generated playlist from api.txt with ${lines.length} entries`);
-            cachedPlaylist = lines.map((line, index) => {
+            
+            // 首先从api.txt获取所有音乐文件名
+            const musicFilesFromApiTxt = lines.map(line => {
               let filename = line.trim();
-              // 移除开头的数字
               filename = filename.replace(/^\d+/, '');
-              
-              // 根据api.txt中的格式生成正确的文件名
-              // 如果文件名包含 "-" 但不是 " - " 格式，将其转换为带空格的格式（匹配实际文件名）
-              if (filename.includes('-') && !filename.includes(' - ')) {
-                if (filename.includes('乌托邦P-反乌托邦')) {
-                  filename = '乌托邦P - 反乌托邦';
-                } else if (filename.includes('ナナツカゼ-あのね')) {
-                  filename = 'ナナツカゼ - あのね';
-                } else if (filename.includes('铁花飞-Mili,塞壬唱片-MSR')) {
-                  filename = '铁花飞-Mili,塞壬唱片-MSR';
-                }
-              }
-              
-              // 确保以.mp3结尾
               if (!filename.toLowerCase().endsWith('.mp3')) {
                 filename += '.mp3';
               }
+              return filename;
+            });
+            
+            // 通过尝试获取lrc目录内容来确定哪些歌曲有歌词文件
+            try {
+              // 尝试获取歌词文件列表以确定哪些歌曲有歌词
+              const lrcFilesResponse = await fetch(`${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}`);
+              let lrcFiles = [];
               
-              const fileName = filename;
-              const info = parseFilename(fileName);
-              
-              // 检查是否存在对应的歌词文件
-              let lrcResult = null;
-              const baseName = fileName.replace('.mp3', '');
-              const hasLrcFile = ['乌托邦P - 反乌托邦.mp3', 'ナナツカゼ - あのね.mp3'].includes(fileName);
-              if (hasLrcFile) {
-                const lrcFileName = baseName + '.lrc';
-                lrcResult = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcFileName)}`;
+              if (lrcFilesResponse.ok) {
+                // 如果能够获取到lrc目录，尝试解析其中的文件
+                const lrcDirContent = await lrcFilesResponse.text();
+                // 使用正则表达式从HTML中提取.lrc文件名
+                const lrcFileRegex = /href\s*=\s*["'][^"']*(\/[^"']*\.lrc)["']/gi;
+                let match;
+                while ((match = lrcFileRegex.exec(lrcDirContent)) !== null) {
+                  const lrcFileName = match[1].split('/').pop();
+                  if (lrcFileName) {
+                    lrcFiles.push(lrcFileName);
+                  }
+                }
+              } else {
+                // 如果无法直接获取lrc目录，尝试使用jsDelivr获取
+                const jsDelivrLrcResponse = await fetch(`${GITHUB_API}/${LRC_DIR}`);
+                if (jsDelivrLrcResponse.ok) {
+                  const lrcDirJson = await jsDelivrLrcResponse.json();
+                  if (Array.isArray(lrcDirJson)) {
+                    lrcFiles = lrcDirJson.filter(item => item.type === 'file' && item.name.endsWith('.lrc'))
+                                        .map(item => item.name);
+                  }
+                }
               }
               
-              return {
-                id: index + 1,
-                name: fileName,
-                artist: info.artist,
-                title: info.title,
-                url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(fileName)}`,
-                lrc: lrcResult
-              };
-            });
+              // 生成播放列表，检查每首歌是否有对应的歌词文件
+              cachedPlaylist = musicFilesFromApiTxt.map((filename, index) => {
+                let fileName = filename;
+                
+                // 特殊处理文件名格式
+                if (fileName.includes('-') && !fileName.includes(' - ')) {
+                  if (fileName.includes('乌托邦P-反乌托邦')) {
+                    fileName = '乌托邦P - 反乌托邦.mp3';
+                  } else if (fileName.includes('ナナツカゼ-あのね')) {
+                    fileName = 'ナナツカゼ - あのね.mp3';
+                  } else if (fileName.includes('铁花飞-Mili,塞壬唱片-MSR')) {
+                    fileName = '铁花飞-Mili,塞壬唱片-MSR.mp3';
+                  }
+                }
+                
+                // 确保以.mp3结尾
+                if (!fileName.toLowerCase().endsWith('.mp3')) {
+                  fileName += '.mp3';
+                }
+                
+                const info = parseFilename(fileName);
+                const baseName = fileName.replace('.mp3', '');
+                
+                // 检查是否存在对应的歌词文件
+                let lrcResult = null;
+                const expectedLrcFileName = baseName + '.lrc';
+                const hasMatchingLrcFile = lrcFiles.some(lrcFile => {
+                  const actualLrcName = lrcFile.split('/').pop();
+                  return actualLrcName === expectedLrcFileName;
+                });
+                
+                if (hasMatchingLrcFile) {
+                  lrcResult = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(expectedLrcFileName)}`;
+                }
+                
+                return {
+                  id: index + 1,
+                  name: fileName,
+                  artist: info.artist,
+                  title: info.title,
+                  url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(fileName)}`,
+                  lrc: lrcResult  // 如果没有匹配的歌词文件，则为null
+                };
+              });
+            } catch (lrcError) {
+              console.error('Error getting lrc files:', lrcError);
+              
+              // 如果无法获取歌词文件列表，使用默认的匹配逻辑
+              cachedPlaylist = musicFilesFromApiTxt.map((filename, index) => {
+                let fileName = filename;
+                
+                // 特殊处理文件名格式
+                if (fileName.includes('-') && !fileName.includes(' - ')) {
+                  if (fileName.includes('乌托邦P-反乌托邦')) {
+                    fileName = '乌托邦P - 反乌托邦.mp3';
+                  } else if (fileName.includes('ナナツカゼ-あのね')) {
+                    fileName = 'ナナツカゼ - あのね.mp3';
+                  } else if (fileName.includes('铁花飞-Mili,塞壬唱片-MSR')) {
+                    fileName = '铁花飞-Mili,塞壬唱片-MSR.mp3';
+                  }
+                }
+                
+                // 确保以.mp3结尾
+                if (!fileName.toLowerCase().endsWith('.mp3')) {
+                  fileName += '.mp3';
+                }
+                
+                const info = parseFilename(fileName);
+                
+                // 检查是否存在对应的歌词文件（默认情况下，只有一些特定文件有歌词）
+                let lrcResult = null;
+                const baseName = fileName.replace('.mp3', '');
+                const hasLrcFile = ['乌托邦P - 反乌托邦.mp3', 'ナナツカゼ - あのね.mp3'].includes(fileName);
+                if (hasLrcFile) {
+                  const lrcFileName = baseName + '.lrc';
+                  lrcResult = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcFileName)}`;
+                }
+                
+                return {
+                  id: index + 1,
+                  name: fileName,
+                  artist: info.artist,
+                  title: info.title,
+                  url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(fileName)}`,
+                  lrc: lrcResult
+                };
+              });
+            }
             
             cacheTime = now;
             return cachedPlaylist;
@@ -385,13 +473,24 @@ async function getPlaylist(env) {
     
     // 在异常情况下也尝试从api.txt生成播放列表
     try {
-      const apiTxtResponse = await fetch('https://raw.githubusercontent.com/Luo202044/classinapi/main/api.txt');
+      const apiTxtUrl = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}api.txt`;
+      const apiTxtResponse = await fetch(apiTxtUrl);
       if (apiTxtResponse.ok) {
         const apiTxtContent = await apiTxtResponse.text();
         const lines = apiTxtContent.split('\n').filter(line => line.trim() !== '');
         
         if (lines.length > 0) {
           console.log(`Generated playlist from api.txt in error handler with ${lines.length} entries`);
+          // 检查哪些歌曲有对应的歌词文件
+          const musicFiles = lines.map(line => {
+            let filename = line.trim();
+            filename = filename.replace(/^\d+/, '');
+            if (!filename.toLowerCase().endsWith('.mp3')) {
+              filename += '.mp3';
+            }
+            return filename;
+          });
+          
           const fallbackPlaylist = lines.map((line, index) => {
             let filename = line.trim();
             // 移除开头的数字
@@ -404,13 +503,27 @@ async function getPlaylist(env) {
             const fileName = filename;
             const info = parseFilename(fileName);
             
+            // 检查是否存在对应的歌词文件
+            let lrcResult = null;
+            const baseName = fileName.replace('.mp3', '');
+            const lrcFileName = baseName + '.lrc';
+            const hasLrcFile = musicFiles.some(musicFile => {
+              const musicBaseName = musicFile.replace('.mp3', '');
+              const expectedLrc = musicBaseName + '.lrc';
+              return expectedLrc === lrcFileName;
+            });
+            
+            if (hasLrcFile) {
+              lrcResult = `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${LRC_DIR}${encodeURIComponent(lrcFileName)}`;
+            }
+            
             return {
               id: index + 1,
               name: fileName,
               artist: info.artist,
               title: info.title,
               url: `${env.BASE_URL || 'https://raw.githubusercontent.com/Luo202044/classinapi/main/'}${MUSIC_DIR}${encodeURIComponent(fileName)}`,
-              lrc: null  // 异常情况下先设置为null
+              lrc: lrcResult  // 根据是否存在歌词文件设置
             };
           });
           
