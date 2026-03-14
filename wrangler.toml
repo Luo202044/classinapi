@@ -9,4 +9,4 @@ enabled = true
 invocation_logs = true
 
 [vars]
-BASE_URL = "https://cdn.jsdmirror.com/gh/Luo202044/music@45f58fe4866f88e62b135986bfe891700888ad0a/"
+BASE_URL = "https://cdn.jsdmirror.cn/gh/Luo202044/music@b45b8bd2919985260f7cb224bd1ee4b741af5346/"
