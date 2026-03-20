@@ -7,6 +7,8 @@ compatibility_date = "2024-01-01"
 [observability.logs]
 enabled = true
 invocation_logs = true
+[observability.traces]
+enabled = false
 
 [vars]
 BASE_URL = "https://cdn.jsdmirror.cn/gh/Luo202044/music@b45b8bd2919985260f7cb224bd1ee4b741af5346/"
