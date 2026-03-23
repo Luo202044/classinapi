@@ -11,5 +11,8 @@ invocation_logs = true
 [observability.traces]
 enabled = true
 
+[[kv_namespaces]]
+binding = "DB"
+
 [vars]
 BASE_URL = "https://cdn.jsdmirror.com/gh/Luo202044/music@a82b77dc4b854926e921f03070c0693d0398358c/"

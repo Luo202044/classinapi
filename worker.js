@@ -3,8 +3,6 @@ const MUSIC_DIR = 'music/';
 const LRC_DIR   = 'lrc/';
 const CACHE_TTL = 30 * 24 * 60 * 60 * 1000;   // 30天
 const REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000; // 7天
-const RATE_LIMIT_WINDOW = 10 * 1000;          // 10秒窗口
-const RATE_LIMIT_MAX_REQUESTS = 50;           // 最大请求次数
 const MAX_FILENAME_LENGTH = 255;              // 最大文件名长度
 const MAX_SEARCH_LENGTH = 200;                // 最大搜索长度
 const MAX_MUSIC_FILE_SIZE = 100 * 1024 * 1024; // 100MB
@@ -14,14 +12,15 @@ const MAX_LRC_FILE_SIZE = 1024 * 1024;        // 1MB
 const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 const DEFAULT_LOG_LEVEL = 'INFO';
 
-// 内存缓存
+// 内存缓存（快速访问）
 let cachedPlaylist = null;
 let cacheTime = 0;
 
-// 速率限制存储（IP -> 时间戳数组）
-const ipRequestMap = new Map();
+// D1 表名
+const CACHE_TABLE = 'cache';
+const CACHE_KEY = 'playlist';
 
-// ========== 日志模块（结构化 JSON 输出） ==========
+// ========== 日志模块 ==========
 class Logger {
   constructor(env) {
     const configuredLevel = (env && env.LOG_LEVEL) || DEFAULT_LOG_LEVEL;
@@ -48,7 +47,7 @@ class Logger {
   error(msg, ctx) { this._log('ERROR', msg, ctx); }
 }
 
-let logger = null; // 延迟初始化，在 handleRequest 中设置
+let logger = null;
 
 // ========== 工具函数 ==========
 function parseFilename(filename) {
@@ -83,7 +82,6 @@ function normalizeBaseUrl(baseUrl) {
 }
 
 function sanitizeFilename(filename) {
-  // 只允许字母、数字、中文、空格、横线、下划线、点
   return filename.replace(/[^\w\u4e00-\u9fa5\-\.\s]/g, '');
 }
 
@@ -100,7 +98,6 @@ function escapeHeaderValue(value) {
 }
 
 function getClientIp(request) {
-  // 优先使用 Cloudflare 提供的真实 IP
   const cfIp = request.headers.get('CF-Connecting-IP');
   if (cfIp && /^[\d\.:a-fA-F]+$/.test(cfIp)) return cfIp;
   const xff = request.headers.get('X-Forwarded-For');
@@ -122,32 +119,75 @@ function corsHeaders() {
   };
 }
 
-// ========== 速率限制 ==========
-function checkRateLimit(ip) {
-  const now = Date.now();
-  const windowStart = now - RATE_LIMIT_WINDOW;
-  let requests = ipRequestMap.get(ip) || [];
-  // 清理过期记录（二分查找加速）
-  let left = 0, right = requests.length;
-  while (left < right) {
-    const mid = Math.floor((left + right) / 2);
-    if (requests[mid] <= windowStart) left = mid + 1;
-    else right = mid;
+// ========== D1 数据库操作 ==========
+async function initD1(env, requestId) {
+  if (!env.DB) {
+    logger.warn('D1 not bound, using memory-only cache', { requestId });
+    return false;
   }
-  if (left > 0) requests = requests.slice(left);
-  if (requests.length >= RATE_LIMIT_MAX_REQUESTS) {
-    return {
-      allowed: false,
-      remaining: 0,
-      resetTime: requests[0] + RATE_LIMIT_WINDOW
-    };
+  try {
+    // 创建表（如果不存在）
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS ${CACHE_TABLE} (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `).run();
+    logger.debug('D1 table ready', { requestId });
+    return true;
+  } catch (err) {
+    logger.error('Failed to init D1 table', { requestId, error: err.message });
+    return false;
   }
-  requests.push(now);
-  ipRequestMap.set(ip, requests);
-  return {
-    allowed: true,
-    remaining: RATE_LIMIT_MAX_REQUESTS - requests.length
-  };
+}
+
+async function loadFromD1(env, requestId) {
+  if (!env.DB) return null;
+  try {
+    const stmt = env.DB.prepare(`SELECT value, updated_at FROM ${CACHE_TABLE} WHERE key = ?`).bind(CACHE_KEY);
+    const result = await stmt.first();
+    if (result) {
+      logger.debug('Loaded from D1', { requestId, updated_at: result.updated_at });
+      return {
+        playlist: JSON.parse(result.value),
+        cacheTime: result.updated_at
+      };
+    }
+  } catch (err) {
+    logger.error('Failed to load from D1', { requestId, error: err.message });
+  }
+  return null;
+}
+
+async function saveToD1(env, playlist, cacheTime, requestId) {
+  if (!env.DB) return false;
+  try {
+    const value = JSON.stringify(playlist);
+    const stmt = env.DB.prepare(`
+      INSERT OR REPLACE INTO ${CACHE_TABLE} (key, value, updated_at)
+      VALUES (?, ?, ?)
+    `).bind(CACHE_KEY, value, cacheTime);
+    await stmt.run();
+    logger.debug('Saved to D1', { requestId, count: playlist.length, cacheTime });
+    return true;
+  } catch (err) {
+    logger.error('Failed to save to D1', { requestId, error: err.message });
+    return false;
+  }
+}
+
+async function deleteFromD1(env, requestId) {
+  if (!env.DB) return false;
+  try {
+    const stmt = env.DB.prepare(`DELETE FROM ${CACHE_TABLE} WHERE key = ?`).bind(CACHE_KEY);
+    await stmt.run();
+    logger.debug('Deleted from D1', { requestId });
+    return true;
+  } catch (err) {
+    logger.error('Failed to delete from D1', { requestId, error: err.message });
+    return false;
+  }
 }
 
 // ========== 核心：从 api.txt 获取播放列表 ==========
@@ -176,7 +216,7 @@ async function fetchPlaylistFromApiTxt(env, requestId) {
   }
 
   const playlist = lines.map((line, index) => {
-    let rawName = line.trim().replace(/^\d+/, ''); // 去除数字前缀
+    let rawName = line.trim().replace(/^\d+/, '');
     if (!rawName.toLowerCase().endsWith('.mp3')) rawName += '.mp3';
     const info = parseFilename(rawName);
     const baseName = rawName.replace('.mp3', '');
@@ -196,33 +236,33 @@ async function fetchPlaylistFromApiTxt(env, requestId) {
   return playlist;
 }
 
-// ========== 获取播放列表（含缓存与刷新策略） ==========
+// ========== 获取播放列表（内存 + D1 持久化缓存） ==========
 async function getPlaylist(env, requestId) {
   const now = Date.now();
 
-  // 缓存存在且未超30天
+  // 1. 尝试从内存读取
   if (cachedPlaylist && (now - cacheTime) < CACHE_TTL) {
-    const cacheAge = now - cacheTime;
-    logger.debug('Cache hit', { requestId, age: cacheAge });
-    // 未满7天，直接返回缓存
+    logger.debug('Memory cache hit', { requestId, age: now - cacheTime });
+    // 检查是否需要刷新
     if ((now - cacheTime) < REFRESH_INTERVAL) {
       return cachedPlaylist;
     }
-    // 满7天，尝试刷新
-    logger.info('Cache refresh triggered', { requestId });
+    // 需要刷新，尝试从源更新
+    logger.info('Cache refresh triggered (memory)', { requestId });
     try {
       const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId);
-      // 比较歌曲数量和名称（避免 JSON.stringify 开销）
       const changed = !(newPlaylist.length === cachedPlaylist.length &&
                         newPlaylist.every((item, i) => item.name === cachedPlaylist[i].name));
       if (changed) {
         logger.info('Cache updated (content changed)', { requestId, newCount: newPlaylist.length });
         cachedPlaylist = newPlaylist;
         cacheTime = now;
+        await saveToD1(env, newPlaylist, now, requestId);
         return newPlaylist;
       } else {
         logger.info('Cache refreshed (no change)', { requestId });
         cacheTime = now;
+        await saveToD1(env, cachedPlaylist, now, requestId);
         return cachedPlaylist;
       }
     } catch (error) {
@@ -231,14 +271,57 @@ async function getPlaylist(env, requestId) {
     }
   }
 
-  // 无缓存或缓存过期 → 强制获取
-  logger.debug('Cache miss or expired', { requestId, cacheExists: !!cachedPlaylist, cacheAge: cacheTime ? now - cacheTime : null });
+  // 2. 内存未命中或已过期，尝试从 D1 加载
+  logger.debug('Memory cache miss or expired', { requestId, cacheExists: !!cachedPlaylist, cacheAge: cacheTime ? now - cacheTime : null });
+  const d1Data = await loadFromD1(env, requestId);
+  if (d1Data && (now - d1Data.cacheTime) < CACHE_TTL) {
+    logger.info('Loaded from D1, updating memory', { requestId, age: now - d1Data.cacheTime });
+    cachedPlaylist = d1Data.playlist;
+    cacheTime = d1Data.cacheTime;
+    // 检查是否需要刷新（基于 D1 的时间）
+    if ((now - cacheTime) < REFRESH_INTERVAL) {
+      return cachedPlaylist;
+    }
+    // 需要刷新，尝试从源更新
+    logger.info('Cache refresh triggered (D1)', { requestId });
+    try {
+      const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId);
+      const changed = !(newPlaylist.length === cachedPlaylist.length &&
+                        newPlaylist.every((item, i) => item.name === cachedPlaylist[i].name));
+      if (changed) {
+        logger.info('Cache updated (content changed)', { requestId, newCount: newPlaylist.length });
+        cachedPlaylist = newPlaylist;
+        cacheTime = now;
+        await saveToD1(env, newPlaylist, now, requestId);
+        return newPlaylist;
+      } else {
+        logger.info('Cache refreshed (no change)', { requestId });
+        cacheTime = now;
+        await saveToD1(env, cachedPlaylist, now, requestId);
+        return cachedPlaylist;
+      }
+    } catch (error) {
+      logger.error('Refresh failed, using old cache', { requestId, error: error.message });
+      return cachedPlaylist;
+    }
+  }
+
+  // 3. D1 也无有效数据，从源获取
+  logger.info('No valid cache found, fetching from source', { requestId });
   try {
     const playlist = await fetchPlaylistFromApiTxt(env, requestId);
     cachedPlaylist = playlist;
     cacheTime = now;
+    await saveToD1(env, playlist, now, requestId);
     return playlist;
   } catch (error) {
+    // 如果 D1 有旧数据（即使过期）且获取失败，可以回退到旧数据？这里按需求返回错误
+    if (d1Data) {
+      logger.warn('Source fetch failed, using expired D1 cache', { requestId });
+      cachedPlaylist = d1Data.playlist;
+      cacheTime = d1Data.cacheTime;
+      return cachedPlaylist;
+    }
     throw new Error('读取回源仓库异常');
   }
 }
@@ -250,50 +333,22 @@ async function handleRequest(request, env) {
   const clientIp = getClientIp(request);
   const baseContext = { requestId, clientIp, method: request.method, url: request.url };
 
-  // 初始化 logger（使用环境变量 LOG_LEVEL）
+  // 初始化 logger
   if (!logger) logger = new Logger(env);
   logger.info('Request started', baseContext);
+
+  // 确保 D1 表存在（仅一次，但可接受）
+  await initD1(env, requestId);
 
   const url = new URL(request.url);
   const path = url.pathname.replace(/^\/+/, '');
 
-  // 预检请求
+  // OPTIONS 预检
   if (request.method === 'OPTIONS') {
     logger.debug('OPTIONS request', baseContext);
     const response = new Response(null, { headers: corsHeaders() });
     const duration = Date.now() - startTime;
     logger.info('Request completed', { ...baseContext, status: 204, duration });
-    return response;
-  }
-
-  // 速率限制检查
-  const rateLimit = checkRateLimit(clientIp);
-  const rateLimitHeaders = {
-    'X-RateLimit-Limit': RATE_LIMIT_MAX_REQUESTS.toString(),
-    'X-RateLimit-Remaining': rateLimit.remaining.toString(),
-    'X-RateLimit-Reset': rateLimit.resetTime ? new Date(rateLimit.resetTime).toISOString() : '',
-  };
-  if (!rateLimit.allowed) {
-    logger.warn('Rate limit exceeded', { ...baseContext, remaining: rateLimit.remaining, resetAt: rateLimit.resetTime });
-    const response = new Response(JSON.stringify({
-      code: 403,
-      message: 'Too Many Requests',
-      data: {
-        limit: RATE_LIMIT_MAX_REQUESTS,
-        window: RATE_LIMIT_WINDOW / 1000,
-        resetAt: new Date(rateLimit.resetTime).toISOString()
-      }
-    }), {
-      status: 403,
-      headers: {
-        'Content-Type': 'application/json',
-        'Retry-After': Math.ceil((rateLimit.resetTime - Date.now()) / 1000).toString(),
-        ...corsHeaders(),
-        ...rateLimitHeaders
-      }
-    });
-    const duration = Date.now() - startTime;
-    logger.info('Request completed', { ...baseContext, status: 403, duration });
     return response;
   }
 
@@ -304,18 +359,18 @@ async function handleRequest(request, env) {
     if (path === 'api.txt') {
       const playlist = await getPlaylist(env, requestId);
       const textList = playlist.map(item => {
-        const name = item.name.slice(0, -4); // 去掉 .mp3
+        const name = item.name.slice(0, -4);
         const dashSpaceIndex = name.indexOf(' - ');
         return dashSpaceIndex !== -1
           ? name.slice(0, dashSpaceIndex) + '-' + name.slice(dashSpaceIndex + 3)
           : name;
       }).join('\n');
       response = new Response(textList, {
-        headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders(), ...rateLimitHeaders }
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
       });
     }
 
-    // 2. JSON 播放列表 /api, /api/playlist, 根路径
+    // 2. JSON 播放列表
     else if (path === 'api' || path === 'api/playlist' || path === '') {
       const playlist = await getPlaylist(env, requestId);
       response = new Response(JSON.stringify({
@@ -323,7 +378,7 @@ async function handleRequest(request, env) {
         message: 'success',
         data: { total: playlist.length, list: playlist }
       }, null, 2), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+        headers: { 'Content-Type': 'application/json', ...corsHeaders() }
       });
     }
 
@@ -332,42 +387,44 @@ async function handleRequest(request, env) {
       const playlist = await getPlaylist(env, requestId);
       if (playlist.length === 0) {
         response = new Response(JSON.stringify({ code: 404, message: 'No music found', data: null }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else {
         const randomItem = playlist[Math.floor(Math.random() * playlist.length)];
         response = new Response(JSON.stringify({ code: 200, message: 'success', data: randomItem }, null, 2), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       }
     }
 
-    // 4. 手动更新缓存（不刷新，直接获取）
+    // 4. 手动更新缓存（从源获取并写入内存+D1）
     else if (path === 'api/update') {
       try {
         const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId);
         cachedPlaylist = newPlaylist;
         cacheTime = Date.now();
+        await saveToD1(env, newPlaylist, cacheTime, requestId);
         logger.info('Manual cache update successful', { requestId, count: newPlaylist.length });
         response = new Response(JSON.stringify({
           code: 200,
           message: 'Cache updated successfully',
           data: { total: newPlaylist.length, list: newPlaylist }
         }, null, 2), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } catch (error) {
         logger.error('Manual cache update failed', { requestId, error: error.message });
         response = new Response(JSON.stringify({ code: 500, message: 'Update failed: ' + error.message, data: null }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       }
     }
 
-    // 5. 强制刷新缓存（清空后重新获取）
+    // 5. 强制刷新（清空内存和D1，然后重新获取）
     else if (path === 'api/refresh') {
       cachedPlaylist = null;
       cacheTime = 0;
+      await deleteFromD1(env, requestId);
       const playlist = await getPlaylist(env, requestId);
       logger.info('Cache force refreshed', { requestId, count: playlist.length });
       response = new Response(JSON.stringify({
@@ -375,7 +432,7 @@ async function handleRequest(request, env) {
         message: 'Playlist refreshed',
         data: { total: playlist.length, list: playlist }
       }, null, 2), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+        headers: { 'Content-Type': 'application/json', ...corsHeaders() }
       });
     }
 
@@ -384,11 +441,11 @@ async function handleRequest(request, env) {
       const query = url.searchParams.get('q') || '';
       if (!query) {
         response = new Response(JSON.stringify({ code: 400, message: '缺少搜索关键词', data: null }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else if (query.length > MAX_SEARCH_LENGTH) {
         response = new Response(JSON.stringify({ code: 400, message: '搜索关键词过长', data: null }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else {
         const playlist = await getPlaylist(env, requestId);
@@ -404,7 +461,7 @@ async function handleRequest(request, env) {
           message: 'success',
           data: { total: results.length, query: query.substring(0, MAX_SEARCH_LENGTH), list: results }
         }, null, 2), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       }
     }
@@ -415,11 +472,11 @@ async function handleRequest(request, env) {
       const cleanName = sanitizeFilename(filename.split('/').pop().split('\\').pop());
       if (!cleanName.toLowerCase().endsWith('.mp3')) {
         response = new Response(JSON.stringify({ code: 400, message: '非法文件类型', data: null }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else if (cleanName.length > MAX_FILENAME_LENGTH) {
         response = new Response(JSON.stringify({ code: 400, message: '文件名过长', data: null }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else {
         const baseUrl = env.BASE_URL;
@@ -430,41 +487,27 @@ async function handleRequest(request, env) {
         if (!resp.ok) {
           logger.warn('Music file not found', { requestId, url: musicUrl, status: resp.status });
           response = new Response(JSON.stringify({ code: 404, message: '音乐文件不存在', data: null }), {
-            headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+            headers: { 'Content-Type': 'application/json', ...corsHeaders() }
           });
         } else {
           const contentType = resp.headers.get('Content-Type') || '';
           if (!contentType.includes('audio/') && !contentType.includes('application/octet-stream')) {
             response = new Response(JSON.stringify({ code: 400, message: '非法文件类型', data: null }), {
-              headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+              headers: { 'Content-Type': 'application/json', ...corsHeaders() }
             });
           } else {
             const contentLength = resp.headers.get('Content-Length');
-            if (contentLength) {
-              const size = parseInt(contentLength, 10);
-              if (size > MAX_MUSIC_FILE_SIZE) {
-                response = new Response(JSON.stringify({ code: 400, message: '文件过大', data: null }), {
-                  headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
-                });
-              } else {
-                response = new Response(resp.body, {
-                  headers: {
-                    'Content-Type': 'audio/mpeg',
-                    'Content-Disposition': `inline; filename="${escapeHeaderValue(cleanName)}"`,
-                    'Accept-Ranges': 'bytes',
-                    ...corsHeaders(),
-                    ...rateLimitHeaders
-                  }
-                });
-              }
+            if (contentLength && parseInt(contentLength, 10) > MAX_MUSIC_FILE_SIZE) {
+              response = new Response(JSON.stringify({ code: 400, message: '文件过大', data: null }), {
+                headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+              });
             } else {
               response = new Response(resp.body, {
                 headers: {
                   'Content-Type': 'audio/mpeg',
                   'Content-Disposition': `inline; filename="${escapeHeaderValue(cleanName)}"`,
                   'Accept-Ranges': 'bytes',
-                  ...corsHeaders(),
-                  ...rateLimitHeaders
+                  ...corsHeaders()
                 }
               });
             }
@@ -479,11 +522,11 @@ async function handleRequest(request, env) {
       const cleanName = sanitizeFilename(filename.split('/').pop().split('\\').pop());
       if (!cleanName.toLowerCase().endsWith('.lrc')) {
         response = new Response(JSON.stringify({ code: 400, message: '非法文件类型', data: null }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else if (cleanName.length > MAX_FILENAME_LENGTH) {
         response = new Response(JSON.stringify({ code: 400, message: '文件名过长', data: null }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else {
         const baseUrl = env.BASE_URL;
@@ -492,32 +535,24 @@ async function handleRequest(request, env) {
         const lrcUrl = `${normalizedBase}${LRC_DIR}${encodeURIComponent(cleanName)}`;
         const resp = await fetch(lrcUrl);
         if (!resp.ok) {
-          // 歌词不存在时返回空字符串，避免 404
           response = new Response('', {
-            headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders(), ...rateLimitHeaders }
+            headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
           });
         } else {
           const contentType = resp.headers.get('Content-Type') || '';
           if (!contentType.includes('text/') && !contentType.includes('application/octet-stream')) {
             response = new Response('', {
-              headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders(), ...rateLimitHeaders }
+              headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
             });
           } else {
             const contentLength = resp.headers.get('Content-Length');
-            if (contentLength) {
-              const size = parseInt(contentLength, 10);
-              if (size > MAX_LRC_FILE_SIZE) {
-                response = new Response('', {
-                  headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders(), ...rateLimitHeaders }
-                });
-              } else {
-                response = new Response(resp.body, {
-                  headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders(), ...rateLimitHeaders }
-                });
-              }
+            if (contentLength && parseInt(contentLength, 10) > MAX_LRC_FILE_SIZE) {
+              response = new Response('', {
+                headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
+              });
             } else {
               response = new Response(resp.body, {
-                headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders(), ...rateLimitHeaders }
+                headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
               });
             }
           }
@@ -528,7 +563,7 @@ async function handleRequest(request, env) {
     // 默认 404
     else {
       response = new Response(JSON.stringify({ code: 404, message: 'API endpoint not found', data: null }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+        headers: { 'Content-Type': 'application/json', ...corsHeaders() }
       });
     }
 
@@ -542,11 +577,11 @@ async function handleRequest(request, env) {
     if (error.message === '读取回源仓库异常') {
       return new Response('读取回源仓库异常', {
         status: 502,
-        headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders(), ...rateLimitHeaders }
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
       });
     }
     return new Response(JSON.stringify({ code: 500, message: 'Server error: ' + error.message, data: null }), {
-      headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...rateLimitHeaders }
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
     });
   }
 }
