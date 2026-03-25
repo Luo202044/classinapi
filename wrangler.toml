@@ -2,7 +2,6 @@ name = "classin-music-api"
 main = "worker.js"
 compatibility_date = "2026-03-20"
 
-
 [observability]
 [observability.logs]
 enabled = true
@@ -16,9 +15,15 @@ binding = "DB"
 database_name = "123"
 database_id = "bb04f23b-8fa5-4c97-8064-3568e1c06f77"
 
-[ratelimits.simple]
-limit = 40
-period = 10
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "4b3fecb3190f41158de6bb29c2b7c936"   # 请替换为实际的 KV 命名空间 ID
+
+[[rate_limits]]
+binding = "MY_RATE_LIMITER"
+namespace_id = "1001"
+simple = { limit = 50, period = 10 }
 
 [vars]
 BASE_URL = "https://cdn.jsdmirror.com/gh/Luo202044/music@a82b77dc4b854926e921f03070c0693d0398358c/"
+# 可选：管理端点的默认 token 已在代码中硬编码为 "1234567890"，也可通过 KV 的 config_token 覆盖
