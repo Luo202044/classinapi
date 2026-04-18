@@ -26,4 +26,5 @@ simple = { limit = 50, period = 10 }
 
 [vars]
 BASE_URL = "https://cdn.jsdmirror.com/gh/Luo202044/music@a82b77dc4b854926e921f03070c0693d0398358c/"
-# 可选：管理端点的默认 token 已在代码中硬编码为 "1234567890"，也可通过 KV 的 config_token 覆盖
+ENVIRONMENT = "production"
+# 管理端点需要在 KV 中配置 config_token，否则将停用管理端点

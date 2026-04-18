@@ -110,6 +110,10 @@ function corsHeaders() {
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Max-Age': '86400',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'X-XSS-Protection': '1; mode=block',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
   };
 }
 
@@ -362,12 +366,19 @@ async function verifyAdminToken(env, request, requestId) {
   const token = url.searchParams.get('token');
   if (!token) return false;
 
-  let configToken = '1234567890';  // 默认值
-  if (env.CONFIG_KV) {
-    const kvToken = await env.CONFIG_KV.get('config_token', 'text');
-    if (kvToken !== null) configToken = kvToken;
-    logger.debug('Read config_token from KV', { requestId, hasToken: !!kvToken });
+  // 强制从 KV 读取 token，无默认值
+  if (!env.CONFIG_KV) {
+    logger.warn('CONFIG_KV not bound, admin endpoints disabled', { requestId });
+    return false;
   }
+
+  const configToken = await env.CONFIG_KV.get('config_token', 'text');
+  if (!configToken) {
+    logger.warn('config_token not configured in KV, admin endpoints disabled', { requestId });
+    return false;
+  }
+
+  logger.debug('Read config_token from KV', { requestId, hasToken: true });
   return token === configToken;
 }
 
@@ -376,7 +387,14 @@ async function handleRequest(request, env) {
   const requestId = crypto.randomUUID();
   const startTime = Date.now();
   const clientIp = getClientIp(request);
-  const baseContext = { requestId, clientIp, method: request.method, url: request.url };
+
+  // 过滤URL中的敏感token参数
+  const urlObj = new URL(request.url);
+  const sanitizedUrl = new URL(request.url);
+  if (sanitizedUrl.searchParams.has('token')) {
+    sanitizedUrl.searchParams.set('token', '***');
+  }
+  const baseContext = { requestId, clientIp, method: request.method, url: sanitizedUrl.toString() };
 
   if (!logger) logger = new Logger(env);
   logger.info('Request started', baseContext);
@@ -642,7 +660,10 @@ async function handleRequest(request, env) {
         headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
       });
     }
-    return new Response(JSON.stringify({ code: 500, message: 'Server error: ' + error.message, data: null }), {
+    // 生产环境返回通用错误，开发环境返回详细错误
+    const isProduction = env.ENVIRONMENT === 'production';
+    const errorMessage = isProduction ? 'Internal Server Error' : 'Server error: ' + error.message;
+    return new Response(JSON.stringify({ code: 500, message: errorMessage, data: null }), {
       headers: { 'Content-Type': 'application/json', ...corsHeaders() }
     });
   }
