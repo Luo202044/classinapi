@@ -9,6 +9,9 @@ const MAX_MUSIC_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const MAX_LRC_FILE_SIZE = 1024 * 1024;        // 1MB
 const CONFIG_CACHE_TTL = 5 * 60 * 1000;       // 配置缓存5分钟
 
+// 允许的音频扩展名（白名单）
+const ALLOWED_AUDIO_EXT = new Set(['.mp3', '.flac', '.wav', '.ogg', '.m4a', '.aac']);
+
 // 日志级别
 const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 const DEFAULT_LOG_LEVEL = 'INFO';
@@ -44,16 +47,29 @@ class Logger {
 }
 
 // ========== 工具函数 ==========
+// 根据扩展名返回 Content-Type
+function getContentTypeByExtension(filename) {
+  const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
+  switch (ext) {
+    case '.mp3': return 'audio/mpeg';
+    case '.flac': return 'audio/flac';
+    case '.wav': return 'audio/wav';
+    case '.ogg': return 'audio/ogg';
+    case '.m4a': return 'audio/mp4';
+    case '.aac': return 'audio/aac';
+    default: return 'application/octet-stream';
+  }
+}
+
 function parseFilename(filename) {
   const lastDotIndex = filename.lastIndexOf('.');
-  if (lastDotIndex === -1) {
-    return { artist: '', title: filename };
+  let ext = '';
+  let nameWithoutExt = filename;
+  if (lastDotIndex !== -1) {
+    ext = filename.slice(lastDotIndex + 1).toLowerCase();
+    nameWithoutExt = filename.slice(0, lastDotIndex);
   }
-  const ext = filename.slice(lastDotIndex + 1).toLowerCase();
-  if (ext !== 'mp3' && ext !== 'lrc') {
-    return { artist: '', title: filename };
-  }
-  const nameWithoutExt = filename.slice(0, lastDotIndex);
+
   let artist = '';
   let title = nameWithoutExt;
 
@@ -68,7 +84,7 @@ function parseFilename(filename) {
       title = nameWithoutExt.slice(dashIndex + 1).trim();
     }
   }
-  return { artist, title };
+  return { artist, title, ext };
 }
 
 function normalizeBaseUrl(baseUrl) {
@@ -235,10 +251,15 @@ async function fetchPlaylistFromApiTxt(env, requestId) {
   }
 
   const playlist = lines.map((line, index) => {
-    let rawName = line.trim().replace(/^\d+/, '');
-    if (!rawName.toLowerCase().endsWith('.mp3')) rawName += '.mp3';
+    let rawName = line.trim().replace(/^\d+/, ''); // 去掉行首的数字序号
+    // 如果没有扩展名，默认补充 .mp3
+    if (!rawName.includes('.')) {
+      rawName += '.mp3';
+    }
     const info = parseFilename(rawName);
-    const baseName = rawName.replace('.mp3', '');
+    // 去掉扩展名，用于构造歌词路径
+    const lastDot = rawName.lastIndexOf('.');
+    const baseName = lastDot !== -1 ? rawName.substring(0, lastDot) : rawName;
     const musicUrl = `${baseUrl}${MUSIC_DIR}${encodeURIComponent(rawName)}`;
     const lrcUrl = `${baseUrl}${LRC_DIR}${encodeURIComponent(baseName + '.lrc')}`;
     return {
@@ -344,12 +365,11 @@ async function getPlaylist(env, requestId) {
 async function reloadConfig(env, requestId) {
   cachedConfig = null;
   configCacheTime = 0;
-  logger.info('Config cache cleared', { requestId });
   // 因为 base_url 变了，播放列表缓存也必须清除
   cachedPlaylist = null;
   cacheTime = 0;
   await deleteFromD1(env, requestId);
-  logger.info('Playlist cache cleared due to config change', { requestId });
+  logger.info('Config and playlist cache cleared', { requestId });
 }
 
 async function reloadMusic(env, requestId) {
@@ -366,7 +386,6 @@ async function verifyAdminToken(env, request, requestId) {
   const token = url.searchParams.get('token');
   if (!token) return false;
 
-  // 强制从 KV 读取 token，无默认值
   if (!env.CONFIG_KV) {
     logger.warn('CONFIG_KV not bound, admin endpoints disabled', { requestId });
     return false;
@@ -389,7 +408,6 @@ async function handleRequest(request, env) {
   const clientIp = getClientIp(request);
 
   // 过滤URL中的敏感token参数
-  const urlObj = new URL(request.url);
   const sanitizedUrl = new URL(request.url);
   if (sanitizedUrl.searchParams.has('token')) {
     sanitizedUrl.searchParams.set('token', '***');
@@ -410,21 +428,6 @@ async function handleRequest(request, env) {
     return response;
   }
 
-  // 速率限制（使用内置 Rate Limiting API）
-  const rateLimiter = env.MY_RATE_LIMITER;
-  if (rateLimiter) {
-    const { success } = await rateLimiter.limit({ key: clientIp });
-    if (!success) {
-      logger.warn('Rate limit exceeded', { requestId, clientIp });
-      return new Response(JSON.stringify({ code: 429, message: 'Too Many Requests', data: null }), {
-        status: 429,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders() }
-      });
-    }
-  } else {
-    logger.warn('Rate limiter not bound', { requestId });
-  }
-
   const url = new URL(request.url);
   const path = url.pathname.replace(/^\/+/, '');
 
@@ -435,7 +438,6 @@ async function handleRequest(request, env) {
     if (path === 'api/ser/reload') {
       const valid = await verifyAdminToken(env, request, requestId);
       if (!valid) {
-        logger.warn('Invalid admin token', { requestId, path });
         return new Response(JSON.stringify({ code: 502, message: 'Bad Gateway', data: null }), {
           status: 502,
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
@@ -449,7 +451,6 @@ async function handleRequest(request, env) {
     else if (path === 'api/ser/meload') {
       const valid = await verifyAdminToken(env, request, requestId);
       if (!valid) {
-        logger.warn('Invalid admin token', { requestId, path });
         return new Response(JSON.stringify({ code: 502, message: 'Bad Gateway', data: null }), {
           status: 502,
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
@@ -469,11 +470,12 @@ async function handleRequest(request, env) {
     else if (path === 'api.txt') {
       const playlist = await getPlaylist(env, requestId);
       const textList = playlist.map(item => {
-        const name = item.name.slice(0, -4);
-        const dashSpaceIndex = name.indexOf(' - ');
+        // 通用去除扩展名
+        const nameWithoutExt = item.name.replace(/\.[^.]+$/, '');
+        const dashSpaceIndex = nameWithoutExt.indexOf(' - ');
         return dashSpaceIndex !== -1
-          ? name.slice(0, dashSpaceIndex) + '-' + name.slice(dashSpaceIndex + 3)
-          : name;
+          ? nameWithoutExt.slice(0, dashSpaceIndex) + '-' + nameWithoutExt.slice(dashSpaceIndex + 3)
+          : nameWithoutExt;
       }).join('\n');
       response = new Response(textList, {
         headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
@@ -506,7 +508,6 @@ async function handleRequest(request, env) {
         cachedPlaylist = newPlaylist;
         cacheTime = Date.now();
         await saveToD1(env, newPlaylist, cacheTime, requestId);
-        logger.info('Manual cache update successful', { requestId, count: newPlaylist.length });
         response = new Response(JSON.stringify({
           code: 200, message: 'Cache updated successfully', data: { total: newPlaylist.length, list: newPlaylist }
         }, null, 2), {
@@ -524,7 +525,6 @@ async function handleRequest(request, env) {
       cacheTime = 0;
       await deleteFromD1(env, requestId);
       const playlist = await getPlaylist(env, requestId);
-      logger.info('Cache force refreshed', { requestId, count: playlist.length });
       response = new Response(JSON.stringify({
         code: 200, message: 'Playlist refreshed', data: { total: playlist.length, list: playlist }
       }, null, 2), {
@@ -558,8 +558,10 @@ async function handleRequest(request, env) {
     else if (path.startsWith('api/music/')) {
       const filename = decodeURIComponent(path.replace('api/music/', ''));
       const cleanName = sanitizeFilename(filename.split('/').pop().split('\\').pop());
-      if (!cleanName.toLowerCase().endsWith('.mp3')) {
-        response = new Response(JSON.stringify({ code: 400, message: '非法文件类型', data: null }), {
+      const ext = cleanName.slice(cleanName.lastIndexOf('.')).toLowerCase();
+      // 检查是否为允许的音频扩展名
+      if (!ALLOWED_AUDIO_EXT.has(ext)) {
+        response = new Response(JSON.stringify({ code: 400, message: '不支持的文件类型', data: null }), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else if (cleanName.length > MAX_FILENAME_LENGTH) {
@@ -576,27 +578,21 @@ async function handleRequest(request, env) {
             headers: { 'Content-Type': 'application/json', ...corsHeaders() }
           });
         } else {
-          const contentType = resp.headers.get('Content-Type') || '';
-          if (!contentType.includes('audio/') && !contentType.includes('application/octet-stream')) {
-            response = new Response(JSON.stringify({ code: 400, message: '非法文件类型', data: null }), {
+          const contentLength = resp.headers.get('Content-Length');
+          if (contentLength && parseInt(contentLength, 10) > MAX_MUSIC_FILE_SIZE) {
+            response = new Response(JSON.stringify({ code: 400, message: '文件过大', data: null }), {
               headers: { 'Content-Type': 'application/json', ...corsHeaders() }
             });
           } else {
-            const contentLength = resp.headers.get('Content-Length');
-            if (contentLength && parseInt(contentLength, 10) > MAX_MUSIC_FILE_SIZE) {
-              response = new Response(JSON.stringify({ code: 400, message: '文件过大', data: null }), {
-                headers: { 'Content-Type': 'application/json', ...corsHeaders() }
-              });
-            } else {
-              response = new Response(resp.body, {
-                headers: {
-                  'Content-Type': 'audio/mpeg',
-                  'Content-Disposition': `inline; filename="${escapeHeaderValue(cleanName)}"`,
-                  'Accept-Ranges': 'bytes',
-                  ...corsHeaders()
-                }
-              });
-            }
+            const contentType = getContentTypeByExtension(cleanName);
+            response = new Response(resp.body, {
+              headers: {
+                'Content-Type': contentType,
+                'Content-Disposition': `inline; filename="${escapeHeaderValue(cleanName)}"`,
+                'Accept-Ranges': 'bytes',
+                ...corsHeaders()
+              }
+            });
           }
         }
       }
@@ -621,22 +617,15 @@ async function handleRequest(request, env) {
             headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
           });
         } else {
-          const contentType = resp.headers.get('Content-Type') || '';
-          if (!contentType.includes('text/') && !contentType.includes('application/octet-stream')) {
+          const contentLength = resp.headers.get('Content-Length');
+          if (contentLength && parseInt(contentLength, 10) > MAX_LRC_FILE_SIZE) {
             response = new Response('', {
               headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
             });
           } else {
-            const contentLength = resp.headers.get('Content-Length');
-            if (contentLength && parseInt(contentLength, 10) > MAX_LRC_FILE_SIZE) {
-              response = new Response('', {
-                headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
-              });
-            } else {
-              response = new Response(resp.body, {
-                headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
-              });
-            }
+            response = new Response(resp.body, {
+              headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
+            });
           }
         }
       }
@@ -660,7 +649,6 @@ async function handleRequest(request, env) {
         headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders() }
       });
     }
-    // 生产环境返回通用错误，开发环境返回详细错误
     const isProduction = env.ENVIRONMENT === 'production';
     const errorMessage = isProduction ? 'Internal Server Error' : 'Server error: ' + error.message;
     return new Response(JSON.stringify({ code: 500, message: errorMessage, data: null }), {
