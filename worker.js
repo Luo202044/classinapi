@@ -12,10 +12,6 @@ const CONFIG_CACHE_TTL = 5 * 60 * 1000;       // 配置缓存5分钟
 // 允许的音频扩展名（白名单）
 const ALLOWED_AUDIO_EXT = new Set(['.mp3', '.flac', '.wav', '.ogg', '.m4a', '.aac']);
 
-// 日志级别
-const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
-const DEFAULT_LOG_LEVEL = 'INFO';
-
 // 内存缓存
 let cachedPlaylist = null;
 let cacheTime = 0;
@@ -25,29 +21,41 @@ let configCacheTime = 0;
 // D1 表名
 const CACHE_TABLE = 'cache';
 const CACHE_KEY = 'playlist';
+const SUPPOSE_TABLE = 'suppose';
 
 let logger = null;
 
-// ========== 日志模块 ==========
+// ========== 优化后的日志模块（中文易读） ==========
 class Logger {
   constructor(env) {
-    const configuredLevel = (env && env.LOG_LEVEL) || DEFAULT_LOG_LEVEL;
-    this.level = LOG_LEVELS[configuredLevel.toUpperCase()] ?? LOG_LEVELS.INFO;
+    const configuredLevel = (env && env.LOG_LEVEL) || 'INFO';
+    const levelMap = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+    this.level = levelMap[configuredLevel.toUpperCase()] ?? 1;
   }
-  _log(level, message, context = {}) {
-    if (LOG_LEVELS[level] < this.level) return;
-    const entry = { timestamp: new Date().toISOString(), level, message, ...context };
-    const consoleMethod = level === 'ERROR' ? console.error : level === 'WARN' ? console.warn : console.log;
-    consoleMethod(JSON.stringify(entry));
+
+  _formatMessage(level, message, context = {}) {
+    const timestamp = new Date().toISOString();
+    const contextStr = Object.entries(context)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(' ');
+    return `[${level}] ${timestamp} - ${message} ${contextStr}`.trim();
   }
-  debug(msg, ctx) { this._log('DEBUG', msg, ctx); }
-  info(msg, ctx)  { this._log('INFO',  msg, ctx); }
-  warn(msg, ctx)  { this._log('WARN',  msg, ctx); }
-  error(msg, ctx) { this._log('ERROR', msg, ctx); }
+
+  _log(level, message, context) {
+    if (this.level > level) return;
+    const formatted = this._formatMessage(level, message, context);
+    if (level === 2) console.warn(formatted);
+    else if (level === 3) console.error(formatted);
+    else console.log(formatted);
+  }
+
+  debug(msg, ctx) { this._log(0, msg, ctx); }
+  info(msg, ctx)  { this._log(1, msg, ctx); }
+  warn(msg, ctx)  { this._log(2, msg, ctx); }
+  error(msg, ctx) { this._log(3, msg, ctx); }
 }
 
 // ========== 工具函数 ==========
-// 根据扩展名返回 Content-Type
 function getContentTypeByExtension(filename) {
   const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
   switch (ext) {
@@ -123,7 +131,7 @@ function getClientIp(request) {
 function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Max-Age': '86400',
     'X-Content-Type-Options': 'nosniff',
@@ -136,10 +144,11 @@ function corsHeaders() {
 // ========== D1 初始化 ==========
 async function initD1(env, requestId) {
   if (!env.DB) {
-    logger.warn('D1 not bound, using memory-only cache', { requestId });
+    logger.warn('D1 未绑定，使用内存缓存', { requestId });
     return false;
   }
   try {
+    // 缓存表
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS ${CACHE_TABLE} (
         key TEXT PRIMARY KEY,
@@ -147,10 +156,21 @@ async function initD1(env, requestId) {
         updated_at INTEGER NOT NULL
       )
     `).run();
-    logger.debug('D1 table ready', { requestId });
+    // 反馈表
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS ${SUPPOSE_TABLE} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        main TEXT NOT NULL,
+        user_ua TEXT,
+        time INTEGER NOT NULL
+      )
+    `).run();
+    logger.debug('D1 表准备就绪', { requestId });
     return true;
   } catch (err) {
-    logger.error('Failed to init D1 table', { requestId, error: err.message });
+    logger.error('D1 表初始化失败', { requestId, error: err.message });
     return false;
   }
 }
@@ -162,14 +182,14 @@ async function loadFromD1(env, requestId) {
     const stmt = env.DB.prepare(`SELECT value, updated_at FROM ${CACHE_TABLE} WHERE key = ?`).bind(CACHE_KEY);
     const result = await stmt.first();
     if (result) {
-      logger.debug('Loaded from D1', { requestId, updated_at: result.updated_at });
+      logger.debug('从 D1 加载缓存', { requestId, updated_at: result.updated_at });
       return {
         playlist: JSON.parse(result.value),
         cacheTime: result.updated_at
       };
     }
   } catch (err) {
-    logger.error('Failed to load from D1', { requestId, error: err.message });
+    logger.error('从 D1 加载失败', { requestId, error: err.message });
   }
   return null;
 }
@@ -183,10 +203,10 @@ async function saveToD1(env, playlist, cacheTime, requestId) {
       VALUES (?, ?, ?)
     `).bind(CACHE_KEY, value, cacheTime);
     await stmt.run();
-    logger.debug('Saved to D1', { requestId, count: playlist.length, cacheTime });
+    logger.debug('保存到 D1', { requestId, count: playlist.length, cacheTime });
     return true;
   } catch (err) {
-    logger.error('Failed to save to D1', { requestId, error: err.message });
+    logger.error('保存到 D1 失败', { requestId, error: err.message });
     return false;
   }
 }
@@ -196,10 +216,10 @@ async function deleteFromD1(env, requestId) {
   try {
     const stmt = env.DB.prepare(`DELETE FROM ${CACHE_TABLE} WHERE key = ?`).bind(CACHE_KEY);
     await stmt.run();
-    logger.debug('Deleted from D1', { requestId });
+    logger.debug('从 D1 删除缓存', { requestId });
     return true;
   } catch (err) {
-    logger.error('Failed to delete from D1', { requestId, error: err.message });
+    logger.error('从 D1 删除失败', { requestId, error: err.message });
     return false;
   }
 }
@@ -214,11 +234,11 @@ async function getConfig(env, requestId) {
   let baseUrl = null;
   if (env.CONFIG_KV) {
     baseUrl = await env.CONFIG_KV.get('base_url', 'text');
-    logger.debug('Read base_url from KV', { requestId, baseUrl });
+    logger.debug('从 KV 读取 base_url', { requestId, baseUrl });
   }
   if (!baseUrl && env.BASE_URL) {
     baseUrl = env.BASE_URL;
-    logger.debug('Fallback to env BASE_URL', { requestId, baseUrl });
+    logger.debug('回退到环境变量 BASE_URL', { requestId, baseUrl });
   }
   if (!baseUrl) {
     throw new Error('未配置 BASE_URL，请在 KV 或环境变量中设置');
@@ -235,29 +255,27 @@ async function fetchPlaylistFromApiTxt(env, requestId) {
   const apiTxtUrl = `${baseUrl}api.txt`;
 
   const fetchStart = Date.now();
-  logger.debug('Fetching api.txt', { requestId, url: apiTxtUrl });
+  logger.debug('正在拉取 api.txt', { requestId, url: apiTxtUrl });
   const response = await fetch(apiTxtUrl, { headers: { 'User-Agent': 'Cloudflare-Worker' } });
   const fetchDuration = Date.now() - fetchStart;
   if (!response.ok) {
-    logger.error('Failed to fetch api.txt', { requestId, status: response.status, duration: fetchDuration });
+    logger.error('拉取 api.txt 失败', { requestId, status: response.status, duration: fetchDuration });
     throw new Error(`获取 api.txt 失败: ${response.status}`);
   }
 
   const text = await response.text();
   const lines = text.split('\n').filter(line => line.trim() !== '');
   if (lines.length === 0) {
-    logger.warn('api.txt is empty', { requestId });
+    logger.warn('api.txt 为空', { requestId });
     throw new Error('api.txt 为空');
   }
 
   const playlist = lines.map((line, index) => {
-    let rawName = line.trim().replace(/^\d+/, ''); // 去掉行首的数字序号
-    // 如果没有扩展名，默认补充 .mp3
+    let rawName = line.trim().replace(/^\d+/, '');
     if (!rawName.includes('.')) {
       rawName += '.mp3';
     }
     const info = parseFilename(rawName);
-    // 去掉扩展名，用于构造歌词路径
     const lastDot = rawName.lastIndexOf('.');
     const baseName = lastDot !== -1 ? rawName.substring(0, lastDot) : rawName;
     const musicUrl = `${baseUrl}${MUSIC_DIR}${encodeURIComponent(rawName)}`;
@@ -272,7 +290,7 @@ async function fetchPlaylistFromApiTxt(env, requestId) {
     };
   });
 
-  logger.info('Fetched playlist', { requestId, count: playlist.length, duration: fetchDuration });
+  logger.info('播放列表拉取成功', { requestId, count: playlist.length, duration: fetchDuration });
   return playlist;
 }
 
@@ -282,68 +300,68 @@ async function getPlaylist(env, requestId) {
 
   // 1. 尝试从内存读取
   if (cachedPlaylist && (now - cacheTime) < CACHE_TTL) {
-    logger.debug('Memory cache hit', { requestId, age: now - cacheTime });
+    logger.debug('内存缓存命中', { requestId, age: now - cacheTime });
     if ((now - cacheTime) < REFRESH_INTERVAL) {
       return cachedPlaylist;
     }
-    logger.info('Cache refresh triggered (memory)', { requestId });
+    logger.info('触发缓存刷新（内存）', { requestId });
     try {
       const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId);
       const changed = !(newPlaylist.length === cachedPlaylist.length &&
                         newPlaylist.every((item, i) => item.name === cachedPlaylist[i].name));
       if (changed) {
-        logger.info('Cache updated (content changed)', { requestId, newCount: newPlaylist.length });
+        logger.info('缓存已更新（内容变化）', { requestId, newCount: newPlaylist.length });
         cachedPlaylist = newPlaylist;
         cacheTime = now;
         await saveToD1(env, newPlaylist, now, requestId);
         return newPlaylist;
       } else {
-        logger.info('Cache refreshed (no change)', { requestId });
+        logger.info('缓存刷新（内容无变化）', { requestId });
         cacheTime = now;
         await saveToD1(env, cachedPlaylist, now, requestId);
         return cachedPlaylist;
       }
     } catch (error) {
-      logger.error('Refresh failed, using old cache', { requestId, error: error.message });
+      logger.error('刷新失败，使用旧缓存', { requestId, error: error.message });
       return cachedPlaylist;
     }
   }
 
   // 2. 内存未命中或已过期，尝试从 D1 加载
-  logger.debug('Memory cache miss or expired', { requestId, cacheExists: !!cachedPlaylist, cacheAge: cacheTime ? now - cacheTime : null });
+  logger.debug('内存缓存未命中或已过期', { requestId, cacheExists: !!cachedPlaylist, cacheAge: cacheTime ? now - cacheTime : null });
   const d1Data = await loadFromD1(env, requestId);
   if (d1Data && (now - d1Data.cacheTime) < CACHE_TTL) {
-    logger.info('Loaded from D1, updating memory', { requestId, age: now - d1Data.cacheTime });
+    logger.info('从 D1 加载，更新内存', { requestId, age: now - d1Data.cacheTime });
     cachedPlaylist = d1Data.playlist;
     cacheTime = d1Data.cacheTime;
     if ((now - cacheTime) < REFRESH_INTERVAL) {
       return cachedPlaylist;
     }
-    logger.info('Cache refresh triggered (D1)', { requestId });
+    logger.info('触发缓存刷新（D1）', { requestId });
     try {
       const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId);
       const changed = !(newPlaylist.length === cachedPlaylist.length &&
                         newPlaylist.every((item, i) => item.name === cachedPlaylist[i].name));
       if (changed) {
-        logger.info('Cache updated (content changed)', { requestId, newCount: newPlaylist.length });
+        logger.info('缓存已更新（内容变化）', { requestId, newCount: newPlaylist.length });
         cachedPlaylist = newPlaylist;
         cacheTime = now;
         await saveToD1(env, newPlaylist, now, requestId);
         return newPlaylist;
       } else {
-        logger.info('Cache refreshed (no change)', { requestId });
+        logger.info('缓存刷新（内容无变化）', { requestId });
         cacheTime = now;
         await saveToD1(env, cachedPlaylist, now, requestId);
         return cachedPlaylist;
       }
     } catch (error) {
-      logger.error('Refresh failed, using old cache', { requestId, error: error.message });
+      logger.error('刷新失败，使用旧缓存', { requestId, error: error.message });
       return cachedPlaylist;
     }
   }
 
   // 3. D1 也无有效数据，从源获取
-  logger.info('No valid cache found, fetching from source', { requestId });
+  logger.info('无有效缓存，从源站获取', { requestId });
   try {
     const playlist = await fetchPlaylistFromApiTxt(env, requestId);
     cachedPlaylist = playlist;
@@ -352,7 +370,7 @@ async function getPlaylist(env, requestId) {
     return playlist;
   } catch (error) {
     if (d1Data) {
-      logger.warn('Source fetch failed, using expired D1 cache', { requestId });
+      logger.warn('源站获取失败，使用过期 D1 缓存', { requestId });
       cachedPlaylist = d1Data.playlist;
       cacheTime = d1Data.cacheTime;
       return cachedPlaylist;
@@ -365,11 +383,10 @@ async function getPlaylist(env, requestId) {
 async function reloadConfig(env, requestId) {
   cachedConfig = null;
   configCacheTime = 0;
-  // 因为 base_url 变了，播放列表缓存也必须清除
   cachedPlaylist = null;
   cacheTime = 0;
   await deleteFromD1(env, requestId);
-  logger.info('Config and playlist cache cleared', { requestId });
+  logger.info('配置和播放列表缓存已清除', { requestId });
 }
 
 async function reloadMusic(env, requestId) {
@@ -377,7 +394,7 @@ async function reloadMusic(env, requestId) {
   cacheTime = 0;
   await deleteFromD1(env, requestId);
   const playlist = await getPlaylist(env, requestId);
-  logger.info('Music cache reloaded', { requestId, count: playlist.length });
+  logger.info('音乐缓存已重载', { requestId, count: playlist.length });
   return playlist;
 }
 
@@ -387,18 +404,243 @@ async function verifyAdminToken(env, request, requestId) {
   if (!token) return false;
 
   if (!env.CONFIG_KV) {
-    logger.warn('CONFIG_KV not bound, admin endpoints disabled', { requestId });
+    logger.warn('CONFIG_KV 未绑定，管理端点禁用', { requestId });
     return false;
   }
 
   const configToken = await env.CONFIG_KV.get('config_token', 'text');
   if (!configToken) {
-    logger.warn('config_token not configured in KV, admin endpoints disabled', { requestId });
+    logger.warn('config_token 未配置，管理端点禁用', { requestId });
     return false;
   }
 
-  logger.debug('Read config_token from KV', { requestId, hasToken: true });
   return token === configToken;
+}
+
+// ========== 反馈专用 Token 验证（多 token，逗号分隔） ==========
+async function verifySuppostToken(env, request, requestId) {
+  const url = new URL(request.url);
+  const token = url.searchParams.get('token');
+  if (!token) return false;
+
+  if (!env.CONFIG_KV) {
+    logger.warn('CONFIG_KV 未绑定，反馈端点禁用', { requestId });
+    return false;
+  }
+
+  const tokensStr = await env.CONFIG_KV.get('suppost_tokens', 'text');
+  if (!tokensStr) {
+    logger.warn('suppost_tokens 未配置', { requestId });
+    return false;
+  }
+
+  const validTokens = tokensStr.split(',').map(t => t.trim());
+  const isValid = validTokens.includes(token);
+  if (!isValid) {
+    logger.warn('反馈 token 验证失败', { requestId });
+  }
+  return isValid;
+}
+
+// ========== 新增：获取反馈列表 ==========
+async function getFeedbackList(env, request, requestId) {
+  const url = new URL(request.url);
+  let page = parseInt(url.searchParams.get('page')) || 1;
+  let limit = parseInt(url.searchParams.get('limit')) || 20;
+
+  if (page < 1) page = 1;
+  if (limit < 1) limit = 1;
+  if (limit > 100) limit = 100;
+
+  const offset = (page - 1) * limit;
+
+  if (!env.DB) {
+    logger.error('D1 未绑定，无法获取反馈列表', { requestId });
+    return new Response(JSON.stringify({ code: 500, message: '数据库未配置', data: null }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+
+  try {
+    // 获取总数
+    const countResult = await env.DB.prepare(`SELECT COUNT(*) as total FROM ${SUPPOSE_TABLE}`).first();
+    const total = countResult ? countResult.total : 0;
+
+    // 获取分页数据，按 time 倒序
+    const stmt = env.DB.prepare(`
+      SELECT id, user_id, title, main, user_ua, time
+      FROM ${SUPPOSE_TABLE}
+      ORDER BY time DESC
+      LIMIT ? OFFSET ?
+    `).bind(limit, offset);
+    const rows = await stmt.all();
+
+    const list = rows.results.map(row => ({
+      id: row.id,
+      user_id: row.user_id,
+      title: row.title,
+      main: row.main,
+      user_ua: row.user_ua || '',
+      time: row.time
+    }));
+
+    const pagination = {
+      page,
+      limit,
+      total,
+      total_pages: Math.ceil(total / limit)
+    };
+
+    logger.info('获取反馈列表成功', { requestId, total, returned: list.length });
+    return new Response(JSON.stringify({
+      code: 200,
+      message: 'success',
+      data: { list, pagination }
+    }), {
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  } catch (err) {
+    logger.error('获取反馈列表失败', { requestId, error: err.message });
+    return new Response(JSON.stringify({ code: 500, message: '服务器错误', data: null }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+}
+
+// ========== 新增：删除反馈 ==========
+async function deleteFeedback(env, request, requestId) {
+  const url = new URL(request.url);
+  const idParam = url.searchParams.get('id');
+  if (!idParam) {
+    return new Response(JSON.stringify({ code: 400, message: '缺少反馈ID', data: null }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+  const id = parseInt(idParam);
+  if (isNaN(id)) {
+    return new Response(JSON.stringify({ code: 400, message: '反馈ID格式错误', data: null }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+
+  if (!env.DB) {
+    logger.error('D1 未绑定，无法删除反馈', { requestId });
+    return new Response(JSON.stringify({ code: 500, message: '数据库未配置', data: null }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+
+  try {
+    // 先检查是否存在
+    const checkStmt = env.DB.prepare(`SELECT id FROM ${SUPPOSE_TABLE} WHERE id = ?`).bind(id);
+    const exists = await checkStmt.first();
+    if (!exists) {
+      return new Response(JSON.stringify({ code: 404, message: '反馈记录不存在', data: null }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+      });
+    }
+
+    const deleteStmt = env.DB.prepare(`DELETE FROM ${SUPPOSE_TABLE} WHERE id = ?`).bind(id);
+    await deleteStmt.run();
+    logger.info('反馈删除成功', { requestId, id });
+    return new Response(JSON.stringify({ code: 200, message: 'success', data: null }), {
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  } catch (err) {
+    logger.error('删除反馈失败', { requestId, id, error: err.message });
+    return new Response(JSON.stringify({ code: 500, message: '删除失败', data: null }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+}
+
+// ========== 新增：提交反馈 ==========
+async function addFeedback(env, request, requestId) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return new Response(JSON.stringify({ code: 400, message: '请求体格式错误', data: null }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+
+  const { user_id, title, main, user_ua: clientUa } = body;
+
+  // 校验必填字段
+  if (!user_id || typeof user_id !== 'string' || user_id.trim() === '') {
+    return new Response(JSON.stringify({ code: 400, message: '缺少必填字段: user_id', data: null }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+  if (!title || typeof title !== 'string' || title.trim() === '') {
+    return new Response(JSON.stringify({ code: 400, message: '缺少必填字段: title', data: null }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+  if (!main || typeof main !== 'string' || main.trim() === '') {
+    return new Response(JSON.stringify({ code: 400, message: '缺少必填字段: main', data: null }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+
+  // 长度限制
+  const trimmedUserId = user_id.trim().slice(0, 50);
+  const trimmedTitle = title.trim().slice(0, 100);
+  let trimmedMain = main.trim();
+  if (trimmedMain.length > 350) trimmedMain = trimmedMain.slice(0, 350);
+  // user_ua 处理：优先客户端传入，否则从请求头获取
+  let finalUa = '';
+  if (clientUa && typeof clientUa === 'string' && clientUa.trim() !== '') {
+    finalUa = clientUa.trim().slice(0, 500);
+  } else {
+    const uaHeader = request.headers.get('User-Agent') || '';
+    finalUa = uaHeader.slice(0, 500);
+  }
+
+  const time = Math.floor(Date.now() / 1000); // Unix 时间戳（秒）
+
+  if (!env.DB) {
+    logger.error('D1 未绑定，无法提交反馈', { requestId });
+    return new Response(JSON.stringify({ code: 500, message: '数据库未配置', data: null }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
+
+  try {
+    const stmt = env.DB.prepare(`
+      INSERT INTO ${SUPPOSE_TABLE} (user_id, title, main, user_ua, time)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(trimmedUserId, trimmedTitle, trimmedMain, finalUa, time);
+    const result = await stmt.run();
+    const newId = result.meta.last_row_id;
+    logger.info('反馈提交成功', { requestId, id: newId, user_id: trimmedUserId });
+    return new Response(JSON.stringify({
+      code: 200,
+      message: '反馈提交成功',
+      data: { id: newId }
+    }), {
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  } catch (err) {
+    logger.error('反馈提交失败', { requestId, error: err.message });
+    return new Response(JSON.stringify({ code: 500, message: '提交失败，请稍后重试', data: null }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
+  }
 }
 
 // ========== 主请求处理 ==========
@@ -415,16 +657,16 @@ async function handleRequest(request, env) {
   const baseContext = { requestId, clientIp, method: request.method, url: sanitizedUrl.toString() };
 
   if (!logger) logger = new Logger(env);
-  logger.info('Request started', baseContext);
+  logger.info('请求开始', baseContext);
 
   await initD1(env, requestId);
 
   // OPTIONS 预检
   if (request.method === 'OPTIONS') {
-    logger.debug('OPTIONS request', baseContext);
+    logger.debug('OPTIONS 预检请求', baseContext);
     const response = new Response(null, { headers: corsHeaders() });
     const duration = Date.now() - startTime;
-    logger.info('Request completed', { ...baseContext, status: 204, duration });
+    logger.info('请求完成', { ...baseContext, status: 204, duration });
     return response;
   }
 
@@ -466,11 +708,42 @@ async function handleRequest(request, env) {
       });
     }
 
+    // ========== 反馈系统端点 ==========
+    else if (path === 'api/suppost/list/get') {
+      const valid = await verifySuppostToken(env, request, requestId);
+      if (!valid) {
+        return new Response(JSON.stringify({ code: 502, message: 'Bad Gateway', data: null }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+        });
+      }
+      response = await getFeedbackList(env, request, requestId);
+    }
+    else if (path === 'api/suppost/list/del') {
+      const valid = await verifySuppostToken(env, request, requestId);
+      if (!valid) {
+        return new Response(JSON.stringify({ code: 502, message: 'Bad Gateway', data: null }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+        });
+      }
+      response = await deleteFeedback(env, request, requestId);
+    }
+    else if (path === 'api/suppost/add') {
+      // 仅支持 POST
+      if (request.method !== 'POST') {
+        return new Response(JSON.stringify({ code: 405, message: 'Method Not Allowed', data: null }), {
+          status: 405,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+        });
+      }
+      response = await addFeedback(env, request, requestId);
+    }
+
     // ========== 原有路由 ==========
     else if (path === 'api.txt') {
       const playlist = await getPlaylist(env, requestId);
       const textList = playlist.map(item => {
-        // 通用去除扩展名
         const nameWithoutExt = item.name.replace(/\.[^.]+$/, '');
         const dashSpaceIndex = nameWithoutExt.indexOf(' - ');
         return dashSpaceIndex !== -1
@@ -514,7 +787,7 @@ async function handleRequest(request, env) {
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } catch (error) {
-        logger.error('Manual cache update failed', { requestId, error: error.message });
+        logger.error('手动更新缓存失败', { requestId, error: error.message });
         response = new Response(JSON.stringify({ code: 500, message: 'Update failed: ' + error.message, data: null }), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
@@ -559,7 +832,6 @@ async function handleRequest(request, env) {
       const filename = decodeURIComponent(path.replace('api/music/', ''));
       const cleanName = sanitizeFilename(filename.split('/').pop().split('\\').pop());
       const ext = cleanName.slice(cleanName.lastIndexOf('.')).toLowerCase();
-      // 检查是否为允许的音频扩展名
       if (!ALLOWED_AUDIO_EXT.has(ext)) {
         response = new Response(JSON.stringify({ code: 400, message: '不支持的文件类型', data: null }), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
@@ -573,7 +845,7 @@ async function handleRequest(request, env) {
         const musicUrl = `${baseUrl}${MUSIC_DIR}${encodeURIComponent(cleanName)}`;
         const resp = await fetch(musicUrl);
         if (!resp.ok) {
-          logger.warn('Music file not found', { requestId, url: musicUrl, status: resp.status });
+          logger.warn('音乐文件不存在', { requestId, url: musicUrl, status: resp.status });
           response = new Response(JSON.stringify({ code: 404, message: '音乐文件不存在', data: null }), {
             headers: { 'Content-Type': 'application/json', ...corsHeaders() }
           });
@@ -637,12 +909,12 @@ async function handleRequest(request, env) {
     }
 
     const duration = Date.now() - startTime;
-    logger.info('Request completed', { ...baseContext, status: response.status, duration });
+    logger.info('请求完成', { ...baseContext, status: response.status, duration });
     return response;
 
   } catch (error) {
     const duration = Date.now() - startTime;
-    logger.error('Request failed', { ...baseContext, error: error.message, duration });
+    logger.error('请求失败', { ...baseContext, error: error.message, duration });
     if (error.message === '读取回源仓库异常') {
       return new Response('读取回源仓库异常', {
         status: 502,
@@ -650,7 +922,7 @@ async function handleRequest(request, env) {
       });
     }
     const isProduction = env.ENVIRONMENT === 'production';
-    const errorMessage = isProduction ? 'Internal Server Error' : 'Server error: ' + error.message;
+    const errorMessage = isProduction ? 'Internal Server Error' : '服务器错误: ' + error.message;
     return new Response(JSON.stringify({ code: 500, message: errorMessage, data: null }), {
       headers: { 'Content-Type': 'application/json', ...corsHeaders() }
     });
