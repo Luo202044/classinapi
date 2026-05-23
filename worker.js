@@ -454,7 +454,12 @@ async function handleRequest(request, env) {
   }
   const baseContext = { requestId, clientIp, method: request.method, url: sanitizedUrl.toString() };
 
+  // ========== 关键修复：确保 logger 在任何日志调用前已初始化 ==========
   if (!logger) logger = new Logger(env);
+  // 可选：如果希望动态调整日志级别，可以每次重新创建（但通常全局一次即可）
+  // 如需每次请求都重新读取 env.LOG_LEVEL，可将上面改为 logger = new Logger(env);
+  // 这里为了性能，保留已有 logger 实例，但环境变量变化不会被感知（可接受）
+
   logger.info('Request started', baseContext);
 
   await initD1(env, requestId);
