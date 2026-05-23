@@ -8,7 +8,7 @@ const MAX_SEARCH_LENGTH = 200;
 const MAX_MUSIC_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const MAX_LRC_FILE_SIZE = 1024 * 1024;        // 1MB
 const CONFIG_CACHE_TTL = 5 * 60 * 1000;       // 配置缓存5分钟
-const MAX_FEEDBACK_MAIN_LENGTH = 550;         // 反馈内容最大字符数（原350）
+const MAX_FEEDBACK_MAIN_LENGTH = 550;         // 反馈内容最大字符数
 
 // 允许的音频扩展名（白名单）
 const ALLOWED_AUDIO_EXT = new Set(['.mp3', '.flac', '.wav', '.ogg', '.m4a', '.aac']);
@@ -27,28 +27,61 @@ let configCacheTime = 0;
 const CACHE_TABLE = 'cache';
 const CACHE_KEY = 'playlist';
 
-let logger = null;
+// ========== 超级健壮的日志模块 ==========
+// 全局 fallback logger（永不失败）
+const fallbackLogger = {
+  debug: (...args) => console.log('[FALLBACK DEBUG]', ...args),
+  info:  (...args) => console.log('[FALLBACK INFO]', ...args),
+  warn:  (...args) => console.warn('[FALLBACK WARN]', ...args),
+  error: (...args) => console.error('[FALLBACK ERROR]', ...args),
+};
 
-// ========== 日志模块 ==========
 class Logger {
   constructor(env) {
-    const configuredLevel = (env && env.LOG_LEVEL) || DEFAULT_LOG_LEVEL;
-    this.level = LOG_LEVELS[configuredLevel.toUpperCase()] ?? LOG_LEVELS.INFO;
+    let level = DEFAULT_LOG_LEVEL;
+    try {
+      const configured = (env && env.LOG_LEVEL) || DEFAULT_LOG_LEVEL;
+      level = configured.toUpperCase();
+      if (!LOG_LEVELS[level]) level = DEFAULT_LOG_LEVEL;
+    } catch (e) {
+      // 忽略任何读取错误，保持默认
+      console.warn('[Logger] Failed to read LOG_LEVEL, using INFO:', e);
+    }
+    this.level = LOG_LEVELS[level];
   }
+
   _log(level, message, context = {}) {
-    if (LOG_LEVELS[level] < this.level) return;
-    const entry = { timestamp: new Date().toISOString(), level, message, ...context };
-    const consoleMethod = level === 'ERROR' ? console.error : level === 'WARN' ? console.warn : console.log;
-    consoleMethod(JSON.stringify(entry));
+    try {
+      if (LOG_LEVELS[level] < this.level) return;
+      const entry = { timestamp: new Date().toISOString(), level, message, ...context };
+      const consoleMethod = level === 'ERROR' ? console.error : level === 'WARN' ? console.warn : console.log;
+      consoleMethod(JSON.stringify(entry));
+    } catch (err) {
+      // 绝对降级：直接打印原始信息
+      console.error('[Logger._log] Failed to log:', err, { level, message, context });
+    }
   }
+
   debug(msg, ctx) { this._log('DEBUG', msg, ctx); }
   info(msg, ctx)  { this._log('INFO',  msg, ctx); }
   warn(msg, ctx)  { this._log('WARN',  msg, ctx); }
   error(msg, ctx) { this._log('ERROR', msg, ctx); }
 }
 
+// 安全的全局 logger 获取器
+let globalLogger = null;
+function getLogger(env) {
+  if (globalLogger) return globalLogger;
+  try {
+    globalLogger = new Logger(env);
+  } catch (e) {
+    console.error('[getLogger] Failed to create Logger, using fallback', e);
+    globalLogger = fallbackLogger;
+  }
+  return globalLogger;
+}
+
 // ========== 工具函数 ==========
-// 根据扩展名返回 Content-Type
 function getContentTypeByExtension(filename) {
   const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
   switch (ext) {
@@ -135,13 +168,12 @@ function corsHeaders() {
 }
 
 // ========== D1 初始化 ==========
-async function initD1(env, requestId) {
+async function initD1(env, requestId, logger) {
   if (!env.DB) {
     logger.warn('D1 not bound, using memory-only cache', { requestId });
     return false;
   }
   try {
-    // 原有 cache 表
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS ${CACHE_TABLE} (
         key TEXT PRIMARY KEY,
@@ -150,7 +182,6 @@ async function initD1(env, requestId) {
       )
     `).run();
 
-    // 反馈表 suppose
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS suppose (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,7 +202,7 @@ async function initD1(env, requestId) {
 }
 
 // ========== D1 缓存操作 ==========
-async function loadFromD1(env, requestId) {
+async function loadFromD1(env, requestId, logger) {
   if (!env.DB) return null;
   try {
     const stmt = env.DB.prepare(`SELECT value, updated_at FROM ${CACHE_TABLE} WHERE key = ?`).bind(CACHE_KEY);
@@ -189,7 +220,7 @@ async function loadFromD1(env, requestId) {
   return null;
 }
 
-async function saveToD1(env, playlist, cacheTime, requestId) {
+async function saveToD1(env, playlist, cacheTime, requestId, logger) {
   if (!env.DB) return false;
   try {
     const value = JSON.stringify(playlist);
@@ -206,7 +237,7 @@ async function saveToD1(env, playlist, cacheTime, requestId) {
   }
 }
 
-async function deleteFromD1(env, requestId) {
+async function deleteFromD1(env, requestId, logger) {
   if (!env.DB) return false;
   try {
     const stmt = env.DB.prepare(`DELETE FROM ${CACHE_TABLE} WHERE key = ?`).bind(CACHE_KEY);
@@ -220,7 +251,7 @@ async function deleteFromD1(env, requestId) {
 }
 
 // ========== 配置获取（从 KV 或环境变量）==========
-async function getConfig(env, requestId) {
+async function getConfig(env, requestId, logger) {
   const now = Date.now();
   if (cachedConfig && (now - configCacheTime) < CONFIG_CACHE_TTL) {
     return cachedConfig;
@@ -245,8 +276,8 @@ async function getConfig(env, requestId) {
 }
 
 // ========== 从 api.txt 获取播放列表 ==========
-async function fetchPlaylistFromApiTxt(env, requestId) {
-  const { baseUrl } = await getConfig(env, requestId);
+async function fetchPlaylistFromApiTxt(env, requestId, logger) {
+  const { baseUrl } = await getConfig(env, requestId, logger);
   const apiTxtUrl = `${baseUrl}api.txt`;
 
   const fetchStart = Date.now();
@@ -266,13 +297,11 @@ async function fetchPlaylistFromApiTxt(env, requestId) {
   }
 
   const playlist = lines.map((line, index) => {
-    let rawName = line.trim().replace(/^\d+/, ''); // 去掉行首的数字序号
-    // 如果没有扩展名，默认补充 .mp3
+    let rawName = line.trim().replace(/^\d+/, '');
     if (!rawName.includes('.')) {
       rawName += '.mp3';
     }
     const info = parseFilename(rawName);
-    // 去掉扩展名，用于构造歌词路径
     const lastDot = rawName.lastIndexOf('.');
     const baseName = lastDot !== -1 ? rawName.substring(0, lastDot) : rawName;
     const musicUrl = `${baseUrl}${MUSIC_DIR}${encodeURIComponent(rawName)}`;
@@ -292,7 +321,7 @@ async function fetchPlaylistFromApiTxt(env, requestId) {
 }
 
 // ========== 获取播放列表（内存 + D1）==========
-async function getPlaylist(env, requestId) {
+async function getPlaylist(env, requestId, logger) {
   const now = Date.now();
 
   // 1. 尝试从内存读取
@@ -303,19 +332,19 @@ async function getPlaylist(env, requestId) {
     }
     logger.info('Cache refresh triggered (memory)', { requestId });
     try {
-      const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId);
+      const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId, logger);
       const changed = !(newPlaylist.length === cachedPlaylist.length &&
                         newPlaylist.every((item, i) => item.name === cachedPlaylist[i].name));
       if (changed) {
         logger.info('Cache updated (content changed)', { requestId, newCount: newPlaylist.length });
         cachedPlaylist = newPlaylist;
         cacheTime = now;
-        await saveToD1(env, newPlaylist, now, requestId);
+        await saveToD1(env, newPlaylist, now, requestId, logger);
         return newPlaylist;
       } else {
         logger.info('Cache refreshed (no change)', { requestId });
         cacheTime = now;
-        await saveToD1(env, cachedPlaylist, now, requestId);
+        await saveToD1(env, cachedPlaylist, now, requestId, logger);
         return cachedPlaylist;
       }
     } catch (error) {
@@ -326,7 +355,7 @@ async function getPlaylist(env, requestId) {
 
   // 2. 内存未命中或已过期，尝试从 D1 加载
   logger.debug('Memory cache miss or expired', { requestId, cacheExists: !!cachedPlaylist, cacheAge: cacheTime ? now - cacheTime : null });
-  const d1Data = await loadFromD1(env, requestId);
+  const d1Data = await loadFromD1(env, requestId, logger);
   if (d1Data && (now - d1Data.cacheTime) < CACHE_TTL) {
     logger.info('Loaded from D1, updating memory', { requestId, age: now - d1Data.cacheTime });
     cachedPlaylist = d1Data.playlist;
@@ -336,19 +365,19 @@ async function getPlaylist(env, requestId) {
     }
     logger.info('Cache refresh triggered (D1)', { requestId });
     try {
-      const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId);
+      const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId, logger);
       const changed = !(newPlaylist.length === cachedPlaylist.length &&
                         newPlaylist.every((item, i) => item.name === cachedPlaylist[i].name));
       if (changed) {
         logger.info('Cache updated (content changed)', { requestId, newCount: newPlaylist.length });
         cachedPlaylist = newPlaylist;
         cacheTime = now;
-        await saveToD1(env, newPlaylist, now, requestId);
+        await saveToD1(env, newPlaylist, now, requestId, logger);
         return newPlaylist;
       } else {
         logger.info('Cache refreshed (no change)', { requestId });
         cacheTime = now;
-        await saveToD1(env, cachedPlaylist, now, requestId);
+        await saveToD1(env, cachedPlaylist, now, requestId, logger);
         return cachedPlaylist;
       }
     } catch (error) {
@@ -360,10 +389,10 @@ async function getPlaylist(env, requestId) {
   // 3. D1 也无有效数据，从源获取
   logger.info('No valid cache found, fetching from source', { requestId });
   try {
-    const playlist = await fetchPlaylistFromApiTxt(env, requestId);
+    const playlist = await fetchPlaylistFromApiTxt(env, requestId, logger);
     cachedPlaylist = playlist;
     cacheTime = now;
-    await saveToD1(env, playlist, now, requestId);
+    await saveToD1(env, playlist, now, requestId, logger);
     return playlist;
   } catch (error) {
     if (d1Data) {
@@ -377,26 +406,25 @@ async function getPlaylist(env, requestId) {
 }
 
 // ========== 管理功能 ==========
-async function reloadConfig(env, requestId) {
+async function reloadConfig(env, requestId, logger) {
   cachedConfig = null;
   configCacheTime = 0;
-  // 因为 base_url 变了，播放列表缓存也必须清除
   cachedPlaylist = null;
   cacheTime = 0;
-  await deleteFromD1(env, requestId);
+  await deleteFromD1(env, requestId, logger);
   logger.info('Config and playlist cache cleared', { requestId });
 }
 
-async function reloadMusic(env, requestId) {
+async function reloadMusic(env, requestId, logger) {
   cachedPlaylist = null;
   cacheTime = 0;
-  await deleteFromD1(env, requestId);
-  const playlist = await getPlaylist(env, requestId);
+  await deleteFromD1(env, requestId, logger);
+  const playlist = await getPlaylist(env, requestId, logger);
   logger.info('Music cache reloaded', { requestId, count: playlist.length });
   return playlist;
 }
 
-async function verifyAdminToken(env, request, requestId) {
+async function verifyAdminToken(env, request, requestId, logger) {
   const url = new URL(request.url);
   const token = url.searchParams.get('token');
   if (!token) return false;
@@ -416,8 +444,7 @@ async function verifyAdminToken(env, request, requestId) {
   return token === configToken;
 }
 
-// ========== 反馈系统专用 token 校验（多 token，逗号分隔）==========
-async function verifySuppostToken(env, request, requestId) {
+async function verifySuppostToken(env, request, requestId, logger) {
   const url = new URL(request.url);
   const token = url.searchParams.get('token');
   if (!token) return false;
@@ -443,26 +470,26 @@ async function verifySuppostToken(env, request, requestId) {
 
 // ========== 主请求处理 ==========
 async function handleRequest(request, env) {
+  // 保底原始日志（绝对可靠）
+  console.log(`[RAW_ENTRY] ${request.method} ${request.url}`);
+
   const requestId = crypto.randomUUID();
   const startTime = Date.now();
   const clientIp = getClientIp(request);
 
-  // 过滤URL中的敏感token参数
+  // 过滤敏感 token
   const sanitizedUrl = new URL(request.url);
   if (sanitizedUrl.searchParams.has('token')) {
     sanitizedUrl.searchParams.set('token', '***');
   }
   const baseContext = { requestId, clientIp, method: request.method, url: sanitizedUrl.toString() };
 
-  // ========== 关键修复：确保 logger 在任何日志调用前已初始化 ==========
-  if (!logger) logger = new Logger(env);
-  // 可选：如果希望动态调整日志级别，可以每次重新创建（但通常全局一次即可）
-  // 如需每次请求都重新读取 env.LOG_LEVEL，可将上面改为 logger = new Logger(env);
-  // 这里为了性能，保留已有 logger 实例，但环境变量变化不会被感知（可接受）
+  // 获取安全的 logger（永不失败）
+  const logger = getLogger(env);
 
   logger.info('Request started', baseContext);
 
-  await initD1(env, requestId);
+  await initD1(env, requestId, logger);
 
   // OPTIONS 预检
   if (request.method === 'OPTIONS') {
@@ -481,27 +508,27 @@ async function handleRequest(request, env) {
 
     // ========== 管理端点 ==========
     if (path === 'api/ser/reload') {
-      const valid = await verifyAdminToken(env, request, requestId);
+      const valid = await verifyAdminToken(env, request, requestId, logger);
       if (!valid) {
         return new Response(JSON.stringify({ code: 502, message: 'Bad Gateway', data: null }), {
           status: 502,
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       }
-      await reloadConfig(env, requestId);
+      await reloadConfig(env, requestId, logger);
       response = new Response(JSON.stringify({ code: 200, message: 'Config reloaded', data: null }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders() }
       });
     }
     else if (path === 'api/ser/meload') {
-      const valid = await verifyAdminToken(env, request, requestId);
+      const valid = await verifyAdminToken(env, request, requestId, logger);
       if (!valid) {
         return new Response(JSON.stringify({ code: 502, message: 'Bad Gateway', data: null }), {
           status: 502,
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       }
-      const playlist = await reloadMusic(env, requestId);
+      const playlist = await reloadMusic(env, requestId, logger);
       response = new Response(JSON.stringify({
         code: 200,
         message: 'Music cache reloaded',
@@ -513,9 +540,8 @@ async function handleRequest(request, env) {
 
     // ========== 原有路由 ==========
     else if (path === 'api.txt') {
-      const playlist = await getPlaylist(env, requestId);
+      const playlist = await getPlaylist(env, requestId, logger);
       const textList = playlist.map(item => {
-        // 通用去除扩展名
         const nameWithoutExt = item.name.replace(/\.[^.]+$/, '');
         const dashSpaceIndex = nameWithoutExt.indexOf(' - ');
         return dashSpaceIndex !== -1
@@ -527,7 +553,7 @@ async function handleRequest(request, env) {
       });
     }
     else if (path === 'api' || path === 'api/playlist' || path === '') {
-      const playlist = await getPlaylist(env, requestId);
+      const playlist = await getPlaylist(env, requestId, logger);
       response = new Response(JSON.stringify({
         code: 200, message: 'success', data: { total: playlist.length, list: playlist }
       }, null, 2), {
@@ -535,7 +561,7 @@ async function handleRequest(request, env) {
       });
     }
     else if (path === 'api/random') {
-      const playlist = await getPlaylist(env, requestId);
+      const playlist = await getPlaylist(env, requestId, logger);
       if (playlist.length === 0) {
         response = new Response(JSON.stringify({ code: 404, message: 'No music found', data: null }), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
@@ -549,10 +575,10 @@ async function handleRequest(request, env) {
     }
     else if (path === 'api/update') {
       try {
-        const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId);
+        const newPlaylist = await fetchPlaylistFromApiTxt(env, requestId, logger);
         cachedPlaylist = newPlaylist;
         cacheTime = Date.now();
-        await saveToD1(env, newPlaylist, cacheTime, requestId);
+        await saveToD1(env, newPlaylist, cacheTime, requestId, logger);
         response = new Response(JSON.stringify({
           code: 200, message: 'Cache updated successfully', data: { total: newPlaylist.length, list: newPlaylist }
         }, null, 2), {
@@ -568,8 +594,8 @@ async function handleRequest(request, env) {
     else if (path === 'api/refresh') {
       cachedPlaylist = null;
       cacheTime = 0;
-      await deleteFromD1(env, requestId);
-      const playlist = await getPlaylist(env, requestId);
+      await deleteFromD1(env, requestId, logger);
+      const playlist = await getPlaylist(env, requestId, logger);
       response = new Response(JSON.stringify({
         code: 200, message: 'Playlist refreshed', data: { total: playlist.length, list: playlist }
       }, null, 2), {
@@ -587,7 +613,7 @@ async function handleRequest(request, env) {
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else {
-        const playlist = await getPlaylist(env, requestId);
+        const playlist = await getPlaylist(env, requestId, logger);
         const safeQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const regex = new RegExp(safeQuery, 'i');
         const results = playlist.filter(item =>
@@ -604,7 +630,6 @@ async function handleRequest(request, env) {
       const filename = decodeURIComponent(path.replace('api/music/', ''));
       const cleanName = sanitizeFilename(filename.split('/').pop().split('\\').pop());
       const ext = cleanName.slice(cleanName.lastIndexOf('.')).toLowerCase();
-      // 检查是否为允许的音频扩展名
       if (!ALLOWED_AUDIO_EXT.has(ext)) {
         response = new Response(JSON.stringify({ code: 400, message: '不支持的文件类型', data: null }), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
@@ -614,7 +639,7 @@ async function handleRequest(request, env) {
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else {
-        const { baseUrl } = await getConfig(env, requestId);
+        const { baseUrl } = await getConfig(env, requestId, logger);
         const musicUrl = `${baseUrl}${MUSIC_DIR}${encodeURIComponent(cleanName)}`;
         const resp = await fetch(musicUrl);
         if (!resp.ok) {
@@ -654,7 +679,7 @@ async function handleRequest(request, env) {
           headers: { 'Content-Type': 'application/json', ...corsHeaders() }
         });
       } else {
-        const { baseUrl } = await getConfig(env, requestId);
+        const { baseUrl } = await getConfig(env, requestId, logger);
         const lrcUrl = `${baseUrl}${LRC_DIR}${encodeURIComponent(cleanName)}`;
         const resp = await fetch(lrcUrl);
         if (!resp.ok) {
@@ -676,10 +701,9 @@ async function handleRequest(request, env) {
       }
     }
 
-    // ========== 新增反馈系统端点 ==========
+    // ========== 反馈系统端点 ==========
     else if (path === 'api/suppost/list/get') {
-      // 校验 token
-      const valid = await verifySuppostToken(env, request, requestId);
+      const valid = await verifySuppostToken(env, request, requestId, logger);
       if (!valid) {
         return new Response(JSON.stringify({ code: 502, message: 'Bad Gateway', data: null }), {
           status: 502,
@@ -687,7 +711,6 @@ async function handleRequest(request, env) {
         });
       }
 
-      // 分页参数
       let page = parseInt(url.searchParams.get('page') || '1');
       let limit = parseInt(url.searchParams.get('limit') || '20');
       if (isNaN(page) || page < 1) page = 1;
@@ -704,11 +727,9 @@ async function handleRequest(request, env) {
       }
 
       try {
-        // 查询总数
         const countResult = await env.DB.prepare('SELECT COUNT(*) as total FROM suppose').first();
         const total = countResult?.total || 0;
 
-        // 查询分页数据，按 time 倒序
         const stmt = env.DB.prepare(`
           SELECT id, user_id, title, main, user_ua, time
           FROM suppose
@@ -716,7 +737,6 @@ async function handleRequest(request, env) {
           LIMIT ? OFFSET ?
         `).bind(limit, offset);
         const rows = await stmt.all();
-
         const list = rows.results || [];
 
         response = new Response(JSON.stringify({
@@ -743,8 +763,7 @@ async function handleRequest(request, env) {
       }
     }
     else if (path === 'api/suppost/list/del') {
-      // 校验 token
-      const valid = await verifySuppostToken(env, request, requestId);
+      const valid = await verifySuppostToken(env, request, requestId, logger);
       if (!valid) {
         return new Response(JSON.stringify({ code: 502, message: 'Bad Gateway', data: null }), {
           status: 502,
@@ -776,7 +795,6 @@ async function handleRequest(request, env) {
       }
 
       try {
-        // 先检查是否存在
         const checkStmt = env.DB.prepare('SELECT id FROM suppose WHERE id = ?').bind(id);
         const exists = await checkStmt.first();
         if (!exists) {
@@ -802,7 +820,6 @@ async function handleRequest(request, env) {
       }
     }
     else if (path === 'api/suppost/add') {
-      // 公开接口，无需 token
       if (request.method !== 'POST') {
         return new Response(JSON.stringify({ code: 405, message: 'Method not allowed', data: null }), {
           status: 405,
@@ -822,7 +839,6 @@ async function handleRequest(request, env) {
 
       const { user_id, title, main, user_ua: clientUa } = body;
 
-      // 校验必填字段
       if (!user_id || typeof user_id !== 'string' || user_id.trim() === '') {
         return new Response(JSON.stringify({ code: 400, message: '缺少必填字段: user_id', data: null }), {
           status: 400,
@@ -842,11 +858,9 @@ async function handleRequest(request, env) {
         });
       }
 
-      // 长度校验
       const trimmedUserId = user_id.trim().substring(0, 50);
       const trimmedTitle = title.trim().substring(0, 100);
       let trimmedMain = main.trim();
-      // 使用新的最大长度常量
       if (trimmedMain.length > MAX_FEEDBACK_MAIN_LENGTH) {
         return new Response(JSON.stringify({ code: 400, message: `main 内容不能超过${MAX_FEEDBACK_MAIN_LENGTH}字符`, data: null }), {
           status: 400,
@@ -854,7 +868,6 @@ async function handleRequest(request, env) {
         });
       }
 
-      // user_ua 优先使用客户端传入，否则从请求头获取
       let finalUserUa = '';
       if (clientUa && typeof clientUa === 'string' && clientUa.trim() !== '') {
         finalUserUa = clientUa.trim().substring(0, 500);
@@ -862,7 +875,7 @@ async function handleRequest(request, env) {
         finalUserUa = (request.headers.get('User-Agent') || '').substring(0, 500);
       }
 
-      const time = Math.floor(Date.now() / 1000); // Unix 时间戳（秒）
+      const time = Math.floor(Date.now() / 1000);
 
       if (!env.DB) {
         return new Response(JSON.stringify({ code: 500, message: 'Database not available', data: null }), {
@@ -877,7 +890,7 @@ async function handleRequest(request, env) {
           VALUES (?, ?, ?, ?, ?)
         `).bind(trimmedUserId, trimmedTitle, trimmedMain, finalUserUa, time);
         const result = await insertStmt.run();
-        const newId = result.meta?.last_row_id || result.lastID; // 兼容不同 D1 返回格式
+        const newId = result.meta?.last_row_id || result.lastID;
 
         logger.info('New feedback added', { requestId, id: newId, user_id: trimmedUserId });
 
